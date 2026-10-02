@@ -12,10 +12,13 @@ WORKDIR /app
 COPY pyproject.toml LICENSE README.md ./
 COPY biolab ./biolab
 
-RUN pip install --no-cache-dir .
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential cmake \
+    && pip install --no-cache-dir ".[turso]" \
+    && apt-get purge -y --auto-remove build-essential cmake \
+    && rm -rf /var/lib/apt/lists/*
 
-# Local SQLite is the zero-dependency default. Mount a volume for durability.
-# Remote Turso is optional and requires installing the package's `turso` extra.
+# This hosted image includes the optional Turso driver for durable Space storage.
 ENV BIOLAB_HOST=0.0.0.0
 ENV BIOLAB_PORT=8000
 ENV BIOLAB_DB_PATH=/tmp/biolab.db

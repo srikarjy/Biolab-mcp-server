@@ -7,6 +7,9 @@ This Compose stack runs one Biolab process behind Caddy. The same process serves
 - the scientist dashboard at `/`
 - readiness at `/health`
 
+Its dedicated image uses standard-library SQLite and does not compile or install
+the optional Turso driver.
+
 It uses a local named volume and requires Biolab API keys. Start it with:
 
 ```bash

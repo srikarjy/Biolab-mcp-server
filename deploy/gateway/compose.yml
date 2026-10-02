@@ -2,7 +2,7 @@ services:
   biolab:
     build:
       context: ../..
-      dockerfile: space/Dockerfile
+      dockerfile: deploy/gateway/Dockerfile
     environment:
       BIOLAB_HOST: 0.0.0.0
       BIOLAB_PORT: 8000
