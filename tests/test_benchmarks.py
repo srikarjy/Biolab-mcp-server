@@ -115,7 +115,7 @@ class TestSQLiteCommitBenchmarks:
         retrieval_id, source_metadata, snapshot, raw_response = make_retrieval_record()
 
         def run_commit():
-            write_retrieval(
+            return write_retrieval(
                 temp_db,
                 query_text="test query",
                 external_id="12345",
@@ -135,7 +135,7 @@ class TestSQLiteCommitBenchmarks:
         retrieval_id, source_metadata, snapshot, raw_response = make_retrieval_record()
 
         def run_commit():
-            write_retrieval(
+            return write_retrieval(
                 temp_db_with_writer,
                 query_text="test query",
                 external_id="12345",

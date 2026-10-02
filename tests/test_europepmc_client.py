@@ -1,7 +1,10 @@
 """Live tests against the real Europe PMC REST API — no fixtures, by design. See
 test_pubmed_client.py for why this project hits the network on every run."""
 
+import pytest
 from biolab.europepmc_client import paper_to_retrieval_input, search_and_fetch
+
+pytestmark = pytest.mark.live
 
 
 def test_search_and_fetch_returns_real_articles():

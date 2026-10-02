@@ -10,6 +10,8 @@ import time
 import pytest
 from biolab.pubmed_client import fetch, search, search_and_fetch
 
+pytestmark = pytest.mark.live
+
 
 @pytest.fixture(autouse=True)
 def _respect_ncbi_rate_limit():

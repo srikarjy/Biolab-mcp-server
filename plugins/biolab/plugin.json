@@ -1,0 +1,38 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "biolab-evidence",
+  "version": "0.4.0",
+  "description": "Search, preserve, review, and monitor auditable biomedical evidence.",
+  "author": {
+    "name": "Srikar Jy",
+    "email": "srikarjy025@gmail.com",
+    "url": "https://github.com/srikarjy"
+  },
+  "homepage": "https://github.com/srikarjy/biolab-mcp-server",
+  "repository": "https://github.com/srikarjy/biolab-mcp-server",
+  "license": "MIT",
+  "keywords": ["biomedical", "evidence", "provenance", "research", "mcp"],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Biolab Evidence",
+        "shortDescription": "Auditable biomedical evidence for scientists and agents",
+        "longDescription": "Search multiple biomedical sources, preserve raw retrievals, review evidence in projects, and monitor saved searches for change.",
+        "developerName": "Srikar Jy",
+        "category": "Productivity",
+        "capabilities": [
+          "Search biomedical evidence",
+          "Trace claims to raw sources",
+          "Review and monitor evidence"
+        ],
+        "websiteURL": "https://github.com/srikarjy/biolab-mcp-server",
+        "defaultPrompt": [
+          "Find auditable evidence about KRAS in pancreatic cancer.",
+          "Create a project and organize the strongest retrieved evidence.",
+          "Show the raw source record behind a retrieval ID."
+        ],
+        "brandColor": "#136F63"
+      }
+    }
+  }
+}

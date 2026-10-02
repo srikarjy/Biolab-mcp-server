@@ -1,7 +1,10 @@
 """Live tests against the real bioRxiv details API — no fixtures, by design. See
 test_pubmed_client.py for why this project hits the network on every run."""
 
+import pytest
 from biolab.biorxiv_client import list_and_fetch, paper_to_retrieval_input
+
+pytestmark = pytest.mark.live
 
 
 def test_list_and_fetch_returns_real_preprints():

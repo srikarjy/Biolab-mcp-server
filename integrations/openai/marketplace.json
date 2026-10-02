@@ -1,0 +1,20 @@
+{
+  "name": "biolab-local",
+  "interface": {
+    "displayName": "Biolab Local Plugins"
+  },
+  "plugins": [
+    {
+      "name": "biolab-evidence",
+      "source": {
+        "source": "local",
+        "path": "../../plugins/biolab"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

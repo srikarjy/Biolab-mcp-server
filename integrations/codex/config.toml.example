@@ -1,0 +1,24 @@
+# Local, private Biolab MCP connection for Codex CLI and the ChatGPT desktop app.
+[mcp_servers.biolab]
+url = "http://127.0.0.1:8000/mcp"
+enabled_tools = [
+  "search_evidence",
+  "search",
+  "fetch",
+  "search_pubmed",
+  "search_europepmc",
+  "search_clinicaltrials",
+  "search_biorxiv",
+  "get_retrieval",
+  "list_projects",
+  "get_evidence_collection",
+  "list_evidence_collections",
+  "list_evidence_events",
+  "list_evidence_watches",
+  "trace_claim",
+  "get_project_report",
+]
+default_tools_approval_mode = "prompt"
+
+# For an authenticated remote deployment, use:
+# bearer_token_env_var = "BIOLAB_API_KEY"

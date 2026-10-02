@@ -1,14 +1,14 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.srikarjy/biolab-mcp-server",
-  "description": "Auditable MCP server for PubMed, Europe PMC, ClinicalTrials.gov, and bioRxiv/medRxiv queries",
+  "description": "Local-first evidence workspace for auditable literature, trials, proteins, targets, monitoring, and claim provenance",
   "title": "Biolab MCP Server",
   "websiteUrl": "https://huggingface.co/spaces/srikarjy025/biolab-mcp",
   "repository": {
     "url": "https://github.com/srikarjy/biolab-mcp-server",
     "source": "github"
   },
-  "version": "0.3.0",
+  "version": "0.4.0",
   "remotes": [
     {
       "type": "streamable-http",

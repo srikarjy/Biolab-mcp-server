@@ -9,13 +9,16 @@
 
 > *"AI agents querying biological databases leave no audit trail. Six months later, nobody can answer: what exact query returned this result, when, and was that paper peer-reviewed at the time? Biolab solves that."*
 
-A **dual-implementation** (Python + Go) [MCP](https://modelcontextprotocol.io) server that sits between AI agents and biological/scientific databases (PubMed, Europe PMC, ClinicalTrials.gov, bioRxiv/medRxiv). Every query is intercepted, logged with full retrieval context, and returns a `retrieval_id` that calling systems store alongside their reasoning traces — creating an end-to-end auditable chain from conclusion back to raw source.
+A **local-first scientific evidence workspace** with Python and Go clients. It sits between scientists or AI agents and PubMed, Europe PMC, ClinicalTrials.gov, UniProt, Open Targets, and bioRxiv/medRxiv. Every retrieval preserves its source response and returns a `retrieval_id`; projects, reviewed collections, evidence watches, and claim links build a traceable workflow on top.
 
-**New to MCP?** It's a small, open standard (built by Anthropic) that lets an AI assistant — Claude, ChatGPT, Cursor, etc. — call out to external tools during a conversation. Add Biolab as an MCP server and any of those assistants gains four new abilities: searching PubMed, Europe PMC, ClinicalTrials.gov, and bioRxiv/medRxiv, with every single result permanently logged so it can be checked later.
+**New to MCP?** It's an open standard that lets an AI assistant — Codex,
+ChatGPT, Claude, Cursor, and others — call external tools during a conversation.
+Add Biolab and the assistant can retrieve, preserve, organize, monitor, and cite
+scientific evidence while keeping every result inspectable later.
 
 ## Use It Now — No Install
 
-A hosted instance is running at `https://srikarjy025-biolab-mcp.hf.space/mcp`. Point your client at it and you're done — nothing to install, nothing to run locally, nothing to sign up for.
+A hosted instance is available at `https://srikarjy025-biolab-mcp.hf.space/mcp`. Point your client at it and you're done. Hosted capabilities follow the version currently deployed there; run locally for the complete 0.4 workspace in this repository.
 
 **Claude Code:**
 ```bash
@@ -34,7 +37,11 @@ claude mcp add --transport http biolab https://srikarjy025-biolab-mcp.hf.space/m
 ```
 (Add `"headers": {"Authorization": "Bearer <your key>"}` alongside `"url"` once you have a key — see the rate-limit note below.)
 
-That's it — `search_pubmed`, `search_europepmc`, `search_clinicaltrials`, `search_biorxiv`, and `get_retrieval` are now available as tools your assistant can call. Every retrieval is written to a hash-chained audit trail you can inspect later (see [Audit Trail Schema](#audit-trail-schema-v2) below).
+The 0.4 server exposes unified search, source-specific search, standard `search`/`fetch`, retrieval inspection, projects, collections, watches, claims, and reports. Every retrieval is written to a hash-chained audit trail you can inspect later (see [Audit Trail Schema](#audit-trail-schema-v2) below).
+
+For cross-source research, `search_evidence` searches PubMed, Europe PMC,
+ClinicalTrials.gov, UniProt, and Open Targets through one call while preserving
+explicit results and errors for each source.
 
 Also listed on the [official MCP Registry](https://registry.modelcontextprotocol.io) and [Smithery](https://smithery.ai/servers/srikarjy025/biolab-mcp) if you'd rather discover/install it from there.
 
@@ -84,6 +91,8 @@ The agent gets the paper it asked for. Biolab gets a permanent, queryable, tampe
 | **PubMed** | `search_pubmed` | `biolab search` | E-utilities, full XML stored |
 | **Europe PMC** | `search_europepmc` | `biolab search-europepmc` | Free, indexes bioRxiv/medRxiv |
 | **ClinicalTrials.gov** | `search_clinicaltrials` | `biolab search-clinicaltrials` | API v2, condition-based search |
+| **UniProt** | `search_evidence` | `biolab evidence` | Protein records and sequences |
+| **Open Targets** | `search_evidence` | `biolab evidence` | Target, disease, and drug entities via GraphQL |
 | **bioRxiv/medRxiv** | `search_biorxiv` | `biolab search-biorxiv` | Date-range pagination (API limit) |
 
 All sources share a **single audit database** (SQLite locally, or [Turso](https://turso.tech) — a hosted, SQLite-compatible database — in production) with one source-agnostic schema.
@@ -112,6 +121,7 @@ cd biolab-mcp-server
 python3 -m venv .venv          # creates an isolated Python environment
 source .venv/bin/activate      # on Windows: .venv\Scripts\activate
 pip install -e ".[dev]"        # installs the package + test tools
+# Add the optional remote Turso driver only if needed: pip install -e ".[turso]"
 ```
 
 ### 3. Try it
@@ -125,10 +135,12 @@ This searches PubMed for real, stores every result in a local `biolab.db` file (
 ### 4. Run the test suite (optional, confirms everything works)
 
 ```bash
-pytest tests/ -v
+pytest -m "not live and not benchmark" -v
 ```
 
-Most tests hit the real PubMed/Europe PMC/ClinicalTrials.gov APIs on purpose (no mocking) — that's a deliberate project rule, not a bug, so a slow test run is normal.
+Run `pytest -m live -v` separately when network access and local socket binding
+are available. Those tests exercise real PubMed, Europe PMC, ClinicalTrials.gov,
+and bioRxiv services; the default command stays deterministic and offline.
 
 ### 5. Run it as an MCP server (what an AI agent actually connects to)
 
@@ -165,6 +177,10 @@ curl -L https://github.com/srikarjy/biolab-mcp-server/releases/latest/download/b
 
 ### CLI (Scientist-Friendly)
 ```bash
+# Search several evidence sources in one audited workflow
+biolab evidence "KRAS pancreatic cancer" \
+  --sources pubmed,europepmc,clinicaltrials,uniprot,opentargets --max 5
+
 # Search PubMed
 biolab search "BRCA1 pancreatic cancer" --max 5
 
@@ -187,13 +203,47 @@ biolab list --source pubmed --limit 10
 # Export for analysis
 biolab export evidence.jsonl --source clinicaltrials
 
+# Verify the complete tamper-evident audit chain
+biolab verify --db biolab.db
+
 # Run demo
 biolab demo --query "BRCA1 pancreatic cancer"
+
+# Run the offline portfolio demo (no network or scientific claims)
+biolab portfolio-demo
+
+# Run the real end-to-end scientist workflow against a local server
+python scripts/scientist_workflow_demo.py --url http://127.0.0.1:8000
+
+# Start the private local dashboard and REST API
+biolab web
+# Open http://127.0.0.1:8000
+
+# Create a project, organize evidence, and trace a claim
+biolab projects create "KRAS target review" --description "Pancreatic cancer evidence"
+biolab collections create <project_id> "Reviewed evidence"
+biolab collections add <collection_id> <retrieval_id> --relevance relevant --note "Reviewed"
+biolab claims create <project_id> "KRAS is a therapeutic target"
+biolab claims link <claim_id> <retrieval_id> --stance supports --assessment human_reviewed
+
+# Monitor a source for added, removed, or revised records
+biolab watches create <project_id> pubmed "KRAS pancreatic cancer"
+biolab watches run-all
+
+# Export a complete project report
+biolab projects report <project_id> --output report.md
 ```
+
+The dashboard binds to `127.0.0.1` by default. REST endpoints cover evidence,
+projects, collections, watches, claims, and reports. Discover them at
+`/openapi.json`; use `/health`, `/metrics`, and `/v1/verify` for operations.
+Run `biolab web --require-auth` with keys created by `biolab keys create`, or use
+`BIOLAB_REQUIRE_AUTH=true` on the unified MCP server, before exposing it remotely.
 
 ### MCP Tools (Agent-Friendly)
 ```json
 // Search any source
+{"name": "search_evidence", "arguments": {"query": "KRAS pancreatic cancer", "agent_id": "research:target-validation", "sources": ["pubmed", "europepmc", "clinicaltrials", "uniprot", "opentargets"], "max_results": 5}}
 {"name": "search_pubmed", "arguments": {"query": "BRCA1 pancreatic cancer", "agent_id": "aletheia:advocate", "max_results": 5}}
 {"name": "search_europepmc", "arguments": {"query": "BRCA1 pancreatic cancer", "agent_id": "aletheia:advocate", "max_results": 5}}
 {"name": "search_clinicaltrials", "arguments": {"query": "pancreatic cancer", "agent_id": "aletheia:advocate", "max_results": 5}}
@@ -202,6 +252,51 @@ biolab demo --query "BRCA1 pancreatic cancer"
 // Retrieve full audit record (works for ALL sources)
 {"name": "get_retrieval", "arguments": {"retrieval_id": "uuid-from-search"}}
 ```
+
+### BioClaw
+
+A ready-to-copy BioClaw skill is included at
+`integrations/bioclaw/biolab-evidence`. It connects BioClaw's containerized
+research assistant to the local REST API and supports cross-source search,
+retrieval inspection, and chain verification without extra Python packages.
+
+### Codex and ChatGPT
+
+- Start the complete local server with `python -m biolab.server`.
+- Copy `integrations/codex/config.toml.example` into your Codex configuration and
+  keep tool approval on `prompt` while developing.
+- The portable Agent Plugin bundle is in `plugins/biolab/` (`plugin.json`,
+  `mcp.json`, and its evidence-workspace skill). Change the remote URL in
+  `mcp.json` to your HTTPS deployment before publishing or submitting it.
+- The MCP server includes standard `search` and `fetch` knowledge tools plus the
+  richer Biolab tools. Tool annotations disclose read-only, write, external-data,
+  and idempotency behavior to clients.
+
+ChatGPT/Codex can therefore search and preserve evidence, create project state,
+run watches, and trace claims. The assistant proposes relationships; a scientist
+must use `human_reviewed` when a relationship has actually been reviewed.
+
+### REST and API gateways
+
+One `python -m biolab.server` process serves MCP at `/mcp`, the dashboard at `/`,
+and REST under `/v1`. The important routes are:
+
+| Route | Purpose |
+|---|---|
+| `POST /v1/evidence/search` | Audited multi-source search |
+| `GET /v1/retrievals/{id}` | Full preserved retrieval |
+| `GET, POST /v1/projects` | List or create projects |
+| `POST /v1/collections` | Create a reviewed collection |
+| `GET, POST /v1/watches` | List or create monitoring queries |
+| `POST /v1/watches/run-all` | Scheduled drift detection |
+| `POST /v1/claims` | Create a claim without asserting truth |
+| `GET /v1/claims/{id}` | Trace claim/evidence relationships |
+| `GET /v1/projects/{id}/report` | JSON or `?format=markdown` report |
+| `GET /openapi.json` | Gateway/API discovery document |
+
+The zero-cost Caddy/Docker example in `deploy/gateway/` adds a reverse-proxy
+boundary and persistent volume. It binds only to localhost by default. Add a real
+domain, HTTPS, backups, and organization-specific authorization before public use.
 
 ### Python API
 ```python
@@ -231,7 +326,9 @@ biolab keys list
 biolab keys revoke alice
 ```
 
-The caller sends the key back as `Authorization: Bearer <key>`. A missing header still works (anonymous tier); a header with an invalid or revoked key is rejected with `401`, not silently downgraded — a typo'd key should fail loudly, not quietly run at a lower tier.
+The caller sends the key back as `Authorization: Bearer <key>`. By default a
+missing header uses the anonymous tier while an invalid/revoked key returns `401`.
+Set `BIOLAB_REQUIRE_AUTH=true` to reject requests without a key as well.
 
 ## Environment Variables
 
@@ -240,10 +337,11 @@ All optional — the server runs with sensible defaults if you set none of these
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `BIOLAB_DB_PATH` | Local SQLite file path (ignored if `TURSO_DATABASE_URL` is set) | `biolab.db` |
-| `TURSO_DATABASE_URL` | Remote [Turso](https://turso.tech) database URL — use this for real persistence in production | unset (uses local file) |
+| `TURSO_DATABASE_URL` | Optional remote [Turso](https://turso.tech) URL; requires `pip install "biolab-mcp[turso]"` | unset (uses local file) |
 | `TURSO_AUTH_TOKEN` | Auth token for the Turso database above | unset |
 | `BIOLAB_HOST` | Host the MCP server binds to | `0.0.0.0` |
 | `BIOLAB_PORT` | Port the MCP server listens on | `8000` |
+| `BIOLAB_REQUIRE_AUTH` | Require a valid Bearer API key on MCP/REST requests | `false` |
 | `NCBI_API_KEY` | Raises the PubMed rate limit from 3 req/s to 10 req/s | unset (works fine without one) |
 
 ## Audit Trail Schema (v2)
@@ -251,7 +349,7 @@ All optional — the server runs with sensible defaults if you set none of these
 ```sql
 CREATE TABLE retrievals (
     retrieval_id     TEXT PRIMARY KEY,  -- UUID
-    source           TEXT NOT NULL,     -- "pubmed", "europepmc", "clinicaltrials", "biorxiv"
+    source           TEXT NOT NULL,     -- pubmed, europepmc, trials, UniProt, Open Targets, etc.
     external_id      TEXT NOT NULL,     -- PMID, NCT ID, DOI, etc.
     query_text       TEXT NOT NULL,     -- exact query sent to source
     retrieved_at     TEXT NOT NULL,     -- ISO 8601 UTC
@@ -274,16 +372,28 @@ CREATE TABLE retrievals (
 
 ```
 biolab/
-├── cli.py                  # Typer CLI (search, get, list, export, demo)
-├── server.py                # FastMCP server, streamable-http transport
+├── cli.py                   # Search plus scientist workspace commands
+├── server.py                # Unified MCP + REST + dashboard process
+├── evidence.py              # Shared multi-source orchestration and audit persistence
+├── workspace.py             # Projects, collections, watches, claims, reports
+├── web.py                   # Local dashboard + versioned REST API
 ├── db.py                    # Connection + schema (local SQLite or remote Turso)
 ├── models.py                 # RetrievalRecord dataclass
 ├── retrieval_log.py          # Only writer + background queue + hash chain
 ├── pubmed_client.py           # PubMed E-utilities wrapper + rate limiter
 ├── europepmc_client.py        # Europe PMC adapter
 ├── clinicaltrials_client.py   # ClinicalTrials.gov adapter
+├── uniprot_client.py          # UniProt adapter
+├── opentargets_client.py      # Open Targets GraphQL adapter
 ├── biorxiv_client.py          # bioRxiv/medRxiv adapter
 └── migrations/                # Schema migration scripts
+
+integrations/
+├── bioclaw/                   # BioClaw evidence skill and REST client
+└── codex/                     # Local MCP configuration template
+
+plugins/biolab/                # Portable Codex/ChatGPT Agent Plugin bundle
+deploy/gateway/                # Caddy + Docker Compose deployment template
 
 space/                      # Files pushed to the hosted Hugging Face Space
 ├── Dockerfile                # Python-server-specific image (see repo-root Dockerfile for the Go one)
@@ -292,10 +402,10 @@ space/                      # Files pushed to the hosted Hugging Face Space
 
 **Design principles:**
 - Python + Go implementations (same interface, different runtimes)
-- MCP tools, not REST API — zero integration overhead for agents
+- Shared core with CLI, MCP, REST, and web delivery surfaces
 - Database, not log files — structured queries across time
 - Hard-fail, never degrade — paper without `retrieval_id` is worse than error
-- Live-API tests, no mocks — real XML/JSON shape catches real bugs
+- Offline acceptance tests plus explicit live connector tests
 - Single-writer queue, not row-level locking — simplest thing that keeps the hash chain consistent under concurrency
 
 ## Development
@@ -303,7 +413,7 @@ space/                      # Files pushed to the hosted Hugging Face Space
 ```bash
 # Python
 pip install -e ".[dev]"
-pytest tests/ -v
+pytest -m "not live and not benchmark" -v
 
 # Go
 cd go-biolab
@@ -316,22 +426,27 @@ go build -o biolab-server ./cmd/server
 
 | Target | Method |
 |--------|--------|
-| **Hosted (no install)** | https://srikarjy025-biolab-mcp.hf.space/mcp — Hugging Face Space, Docker SDK, backed by Turso |
+| **Hosted (no install)** | https://srikarjy025-biolab-mcp.hf.space/mcp — capabilities depend on the deployed Space version |
 | **Local** | `pipx install biolab-mcp` or download binary |
 | **CI/CD** | GitHub Actions → PyPI (Trusted Publishing/OIDC) + GHCR + GitHub Releases |
 | **Containers** | `docker pull ghcr.io/srikarjy/biolab-mcp:latest`, or build `space/Dockerfile` yourself |
 | **Linux packages** | `.deb`, `.rpm`, `.apk` via goreleaser |
 | **Discovery** | [MCP Registry](https://registry.modelcontextprotocol.io) · [Smithery](https://smithery.ai/servers/srikarjy025/biolab-mcp) |
 
-**Running cost: $0/month.** The Space runs on Hugging Face's free `cpu-basic` tier (this workload waits on network calls, not compute, so it never needed more). Turso's free tier is currently at 0% of its storage/read/write quotas, and has overages *disabled* — if usage ever did hit a limit, requests get rejected, not silently billed. There's no realistic query volume (short of literally millions/month) that would introduce a cost.
+**Student-cost path:** local SQLite, the CLI, dashboard, MCP server, BioClaw
+client, and Caddy gateway require no paid service. Free hosted tiers may also work,
+but their quotas and persistence policies can change; verify them before relying on
+a public deployment.
 
 ## Roadmap
 
-- [ ] Evidence drift detection (retraction monitoring via response hashes)
+- [x] Added/removed/content-changed evidence monitoring via response hashes
+- [x] Projects, collections, claims, reports, REST, dashboard, and agent packaging
 - [ ] Provenance graph (cross-source linking by DOI)
 - [ ] Nextflow/Snakemake plugins
 - [ ] Rate limiting + caching (audit-safe)
-- [ ] Auth + multi-tenant support
+- [ ] Organization accounts and fine-grained project authorization
+- [ ] Retraction/correction feeds with durable alert delivery
 
 ## License
 

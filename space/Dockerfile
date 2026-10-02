@@ -14,9 +14,8 @@ COPY biolab ./biolab
 
 RUN pip install --no-cache-dir .
 
-# Storage is remote (Turso, via TURSO_DATABASE_URL/TURSO_AUTH_TOKEN Space secrets);
-# BIOLAB_DB_PATH is only a placeholder used before those env vars resolve the
-# real target — see biolab/db.py resolve_target().
+# Local SQLite is the zero-dependency default. Mount a volume for durability.
+# Remote Turso is optional and requires installing the package's `turso` extra.
 ENV BIOLAB_HOST=0.0.0.0
 ENV BIOLAB_PORT=8000
 ENV BIOLAB_DB_PATH=/tmp/biolab.db

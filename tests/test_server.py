@@ -18,7 +18,9 @@ from pathlib import Path
 import httpx
 import pytest
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+from mcp.client.streamable_http import streamable_http_client
+
+pytestmark = pytest.mark.live
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -65,7 +67,7 @@ async def _running_server(db_path: str):
 
 async def _call_tool(db_path: str, tool_name: str, arguments: dict):
     async with (
-        _running_server(db_path) as url, streamablehttp_client(url) as (read, write, _),
+        _running_server(db_path) as url, streamable_http_client(url) as (read, write, _),
         ClientSession(read, write) as session,
     ):
         await session.initialize()

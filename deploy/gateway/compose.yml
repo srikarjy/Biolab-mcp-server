@@ -1,0 +1,26 @@
+services:
+  biolab:
+    build:
+      context: ../..
+      dockerfile: space/Dockerfile
+    environment:
+      BIOLAB_HOST: 0.0.0.0
+      BIOLAB_PORT: 8000
+      BIOLAB_DB_PATH: /data/biolab.db
+      BIOLAB_REQUIRE_AUTH: "true"
+    volumes:
+      - biolab-data:/data
+    restart: unless-stopped
+
+  gateway:
+    image: caddy:2-alpine
+    depends_on:
+      - biolab
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    restart: unless-stopped
+
+volumes:
+  biolab-data:

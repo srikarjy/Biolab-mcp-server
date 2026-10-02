@@ -10,10 +10,9 @@ import json
 import queue
 import threading
 import uuid
+from concurrent.futures import Future
 from datetime import UTC, datetime
 from typing import Any
-
-import libsql
 
 from biolab import db as db_module
 from biolab.models import RetrievalRecord
@@ -27,21 +26,24 @@ _writer_db_path: str | None = None
 def _writer_loop(db_path: str) -> None:
     """Writer loop runs in its own thread with its own libSQL connection."""
     target, token = db_module.resolve_target(db_path)
-    conn = libsql.connect(target, auth_token=token) if token else libsql.connect(target)
+    conn = db_module.open_connection(target, token)
     try:
-        while not _writer_stop.is_set() or not _write_queue.empty():
+        while True:
             try:
                 item = _write_queue.get(timeout=0.1)
             except queue.Empty:
                 continue
             if item is None:
                 break
-            record, done_event = item
+            record, result = item
             try:
                 _chain_and_insert(conn, record)
                 conn.commit()
-            finally:
-                done_event.set()
+            except Exception as exc:
+                conn.rollback()
+                result.set_exception(exc)
+            else:
+                result.set_result(None)
     finally:
         conn.close()
 
@@ -63,10 +65,12 @@ def start_writer(db_path: str) -> None:
 def stop_writer() -> None:
     """Stop the background writer thread (call at shutdown)."""
     global _writer_thread, _writer_db_path
+    if _writer_thread is None:
+        return
     _writer_stop.set()
     _write_queue.put(None)
     if _writer_thread is not None:
-        _writer_thread.join(timeout=5)
+        _writer_thread.join()
     _writer_thread = None
     _writer_db_path = None
 
@@ -203,9 +207,9 @@ def write_retrieval(
 
     if _writer_thread is not None and _writer_thread.is_alive() and _writer_db_path == target:
         # Use background writer
-        done_event = threading.Event()
-        _write_queue.put((record, done_event))
-        done_event.wait()
+        result: Future[None] = Future()
+        _write_queue.put((record, result))
+        result.result()
     else:
         # Fallback to synchronous write (tests, or writer not started)
         _write_sync(conn, record)

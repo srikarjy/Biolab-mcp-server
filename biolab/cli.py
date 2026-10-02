@@ -9,7 +9,8 @@ from rich.console import Console
 from rich.syntax import Syntax
 from rich.table import Table
 
-from biolab import auth, db, retrieval_log
+from biolab import auth, db, retrieval_log, workspace
+from biolab import evidence as evidence_service
 
 app = typer.Typer(
     name="biolab",
@@ -20,6 +21,14 @@ console = Console()
 
 keys_app = typer.Typer(help="Manage API keys for the hosted server's per-caller rate-limit tiers.")
 app.add_typer(keys_app, name="keys")
+projects_app = typer.Typer(help="Manage scientist research projects.")
+app.add_typer(projects_app, name="projects")
+collections_app = typer.Typer(help="Manage reviewed evidence collections.")
+app.add_typer(collections_app, name="collections")
+watches_app = typer.Typer(help="Monitor evidence searches for changes.")
+app.add_typer(watches_app, name="watches")
+claims_app = typer.Typer(help="Trace scientific claims to preserved evidence.")
+app.add_typer(claims_app, name="claims")
 
 
 @keys_app.command("create")
@@ -74,6 +83,276 @@ def keys_revoke(
 
 def _get_conn(db_path: str):
     return db.connect(db_path)
+
+
+@projects_app.command("create")
+def project_create(
+    name: str,
+    description: str = typer.Option("", "--description", "-d"),
+    db_path: str = typer.Option("biolab.db", "--db"),
+):
+    """Create a research project."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.create_project(conn, name, description)
+    finally:
+        conn.close()
+    console.print_json(data=result)
+
+
+@projects_app.command("list")
+def project_list(db_path: str = typer.Option("biolab.db", "--db")):
+    """List research projects."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.list_projects(conn)
+    finally:
+        conn.close()
+    console.print_json(data={"projects": result})
+
+
+@projects_app.command("report")
+def project_report(
+    project_id: str,
+    output: Path = typer.Option(..., "--output", "-o", help="Markdown output file"),
+    db_path: str = typer.Option("biolab.db", "--db"),
+):
+    """Export a project as a human-readable evidence report."""
+    conn = _get_conn(db_path)
+    try:
+        report = workspace.get_project_report(conn, project_id)
+    finally:
+        conn.close()
+    if report is None:
+        console.print("[red]Project not found[/red]")
+        raise typer.Exit(1)
+    output.write_text(workspace.render_project_markdown(report))
+    console.print(f"[green]Wrote evidence report to {output}[/green]")
+
+
+@collections_app.command("create")
+def collection_create(
+    project_id: str,
+    name: str,
+    description: str = typer.Option("", "--description", "-d"),
+    db_path: str = typer.Option("biolab.db", "--db"),
+):
+    """Create an evidence collection inside a project."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.create_collection(conn, project_id, name, description)
+    finally:
+        conn.close()
+    console.print_json(data=result)
+
+
+@collections_app.command("list")
+def collection_list(
+    project_id: str = typer.Option(None, "--project"),
+    db_path: str = typer.Option("biolab.db", "--db"),
+):
+    """List evidence collections, optionally within one project."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.list_collections(conn, project_id)
+    finally:
+        conn.close()
+    console.print_json(data={"collections": result})
+
+
+@collections_app.command("add")
+def collection_add(
+    collection_id: str,
+    retrieval_id: str,
+    relevance: str = typer.Option("unreviewed", "--relevance"),
+    note: str = typer.Option("", "--note"),
+    db_path: str = typer.Option("biolab.db", "--db"),
+):
+    """Add or review a retrieval in an evidence collection."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.add_collection_item(
+            conn, collection_id, retrieval_id, note, relevance
+        )
+    finally:
+        conn.close()
+    console.print_json(data=result)
+
+
+@collections_app.command("show")
+def collection_show(
+    collection_id: str,
+    db_path: str = typer.Option("biolab.db", "--db"),
+):
+    """Show a collection with its reviewed evidence."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.get_collection(conn, collection_id)
+    finally:
+        conn.close()
+    if result is None:
+        console.print("[red]Collection not found[/red]")
+        raise typer.Exit(1)
+    console.print_json(data=result)
+
+
+@watches_app.command("create")
+def watch_create(
+    project_id: str,
+    source: str,
+    query: str,
+    agent_id: str = typer.Option("cli:watch", "--agent", "-a"),
+    max_results: int = typer.Option(10, "--max", "-n"),
+    db_path: str = typer.Option("biolab.db", "--db"),
+):
+    """Create a saved evidence watch."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.create_watch(
+            conn, project_id, source, query, agent_id, max_results
+        )
+    finally:
+        conn.close()
+    console.print_json(data=result)
+
+
+@watches_app.command("run")
+def watch_run(watch_id: str, db_path: str = typer.Option("biolab.db", "--db")):
+    """Run one saved watch and record changes."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.run_watch(conn, watch_id)
+    finally:
+        conn.close()
+    console.print_json(data=result)
+
+
+@watches_app.command("events")
+def watch_events(watch_id: str, db_path: str = typer.Option("biolab.db", "--db")):
+    """List recorded change events for a watch."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.list_watch_events(conn, watch_id)
+    finally:
+        conn.close()
+    console.print_json(data={"events": result})
+
+
+@watches_app.command("run-all")
+def watch_run_all(db_path: str = typer.Option("biolab.db", "--db")):
+    """Run every active watch; suitable for cron or a scheduled job."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.run_active_watches(conn)
+    finally:
+        conn.close()
+    console.print_json(data=result)
+    if result["errors"]:
+        raise typer.Exit(1)
+
+
+@claims_app.command("create")
+def claim_create(
+    project_id: str,
+    claim: str,
+    db_path: str = typer.Option("biolab.db", "--db"),
+):
+    """Create a claim that can be assessed against preserved evidence."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.create_claim(conn, project_id, claim)
+    finally:
+        conn.close()
+    console.print_json(data=result)
+
+
+@claims_app.command("link")
+def claim_link(
+    claim_id: str,
+    retrieval_id: str,
+    stance: str = typer.Option(..., "--stance"),
+    assessment: str = typer.Option("unreviewed", "--assessment"),
+    note: str = typer.Option("", "--note"),
+    db_path: str = typer.Option("biolab.db", "--db"),
+):
+    """Link a claim to evidence with an explicit stance and review state."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.link_claim_evidence(
+            conn, claim_id, retrieval_id, stance, assessment, note
+        )
+    finally:
+        conn.close()
+    console.print_json(data=result)
+
+
+@claims_app.command("show")
+def claim_show(claim_id: str, db_path: str = typer.Option("biolab.db", "--db")):
+    """Show a claim and every supporting, conflicting, or contextual record."""
+    conn = _get_conn(db_path)
+    try:
+        result = workspace.trace_claim(conn, claim_id)
+    finally:
+        conn.close()
+    if result is None:
+        console.print("[red]Claim not found[/red]")
+        raise typer.Exit(1)
+    console.print_json(data=result)
+
+
+@app.command()
+def evidence(
+    query: str = typer.Argument(..., help="Scientific evidence query"),
+    sources: str = typer.Option(
+        "pubmed,europepmc,clinicaltrials,uniprot,opentargets",
+        "--sources",
+        help="Comma-separated sources",
+    ),
+    agent_id: str = typer.Option("cli:user", "--agent", "-a", help="Agent identifier"),
+    max_results: int = typer.Option(5, "--max", "-n", help="Max results per source (1-50)"),
+    db_path: str = typer.Option("biolab.db", "--db", help="Path to SQLite database"),
+):
+    """Search multiple evidence sources and persist an auditable result set."""
+    selected_sources = [source.strip().lower() for source in sources.split(",") if source.strip()]
+    conn = _get_conn(db_path)
+    try:
+        result = evidence_service.search_evidence(
+            conn,
+            query=query,
+            agent_id=agent_id,
+            sources=selected_sources,
+            max_results=max_results,
+        )
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    finally:
+        conn.close()
+
+    console.print_json(data=result)
+    if result["errors"]:
+        console.print("[yellow]Completed with explicit source errors; see errors above.[/yellow]")
+
+
+@app.command()
+def web(
+    host: str = typer.Option("127.0.0.1", "--host", help="Interface to bind"),
+    port: int = typer.Option(8000, "--port", help="Port to bind"),
+    db_path: str = typer.Option("biolab.db", "--db", help="Path to SQLite database"),
+    require_auth: bool = typer.Option(False, "--require-auth", help="Require a Biolab API key"),
+):
+    """Run the local evidence dashboard and REST API."""
+    import uvicorn
+
+    from biolab.web import create_app
+
+    if host not in {"127.0.0.1", "localhost", "::1"} and not require_auth:
+        console.print(
+            "[yellow]Warning: external binding without --require-auth exposes the REST API; "
+            "use a trusted network or enable API-key authentication.[/yellow]"
+        )
+    console.print(f"[green]Biolab dashboard:[/green] http://{host}:{port}")
+    uvicorn.run(create_app(db_path, require_auth=require_auth), host=host, port=port)
 
 
 @app.command()
@@ -369,9 +648,9 @@ def export(
     rows = conn.execute(
         f"""
         SELECT retrieval_id, source, external_id, query_text, retrieved_at,
-               agent_id, source_metadata, raw_response, snapshot, response_hash
+               agent_id, source_metadata, raw_response, snapshot, response_hash, prev_hash
         FROM retrievals {where}
-        ORDER BY retrieved_at DESC
+        ORDER BY rowid ASC
         """,
         params,
     ).fetchall()
@@ -388,6 +667,8 @@ def export(
                 "source_metadata": json.loads(row[6]),
                 "snapshot": json.loads(row[8]),
                 "response_hash": row[9],
+                "prev_hash": row[10],
+                "raw_response": row[7],
             }
             f.write(json.dumps(record) + "\n")
 
@@ -452,7 +733,36 @@ def demo(
             console.print(f"  Hash: {fetched_record.response_hash[:16]}...")
 
     console.print("\n[bold green]✓ Demo complete[/bold green]")
-    console.print("Each retrieval_id creates an unforgeable link from conclusion → raw source.")
+    console.print("Each retrieval_id creates an inspectable link from conclusion → raw source.")
+
+
+@app.command()
+def verify(
+    db_path: str = typer.Option("biolab.db", "--db", help="Database to verify"),
+):
+    """Verify the stored payload hash chain; exit nonzero on corruption."""
+    conn = db.connect(db_path)
+    try:
+        ok, broken_id = retrieval_log.verify_chain(conn)
+        count = conn.execute("SELECT count(*) FROM retrievals").fetchone()[0]
+    finally:
+        conn.close()
+    if not ok:
+        console.print(f"[red]Chain broken at {broken_id}[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Chain valid: {count} records[/green]")
+
+
+@app.command(name="portfolio-demo")
+def portfolio_demo():
+    """Run an isolated, offline provenance and tamper-detection demonstration."""
+    from biolab.demo import run_demo
+
+    result = run_demo()
+    console.print("[bold cyan]Biolab / evidence provenance[/bold cyan]")
+    console.print("Synthetic teaching data; no scientific claims or network requests.")
+    console.print_json(data=result)
+    console.print("[green]PASS: records persisted, retrieved, and verified; tampering detected.[/green]")
 
 
 if __name__ == "__main__":

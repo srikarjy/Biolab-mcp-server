@@ -208,3 +208,40 @@ def test_forced_db_error_mid_write_raises_loudly(tmp_path):
     assert raised is True
     count = conn.execute("SELECT count(*) FROM retrievals").fetchone()[0]
     assert count == 0
+
+def test_background_failure_propagates_and_writer_recovers(tmp_path):
+    """A real SQLite trigger rejects an insert; the caller must receive the error."""
+    import pytest
+
+    path = str(tmp_path / "failure.db")
+    conn = db.connect(path)
+    conn.execute("""CREATE TRIGGER reject_bad BEFORE INSERT ON retrievals
+                    WHEN NEW.external_id = 'bad'
+                    BEGIN SELECT RAISE(ABORT, 'rejected test record'); END""")
+    conn.commit()
+    retrieval_log.start_writer(path)
+    try:
+        with pytest.raises(Exception, match="rejected test record"):
+            retrieval_log.write_retrieval(conn, "q", "bad", "a", "pubmed", {}, "x", {})
+        good = retrieval_log.write_retrieval(conn, "q", "good", "a", "pubmed", {}, "y", {})
+        assert retrieval_log.get_retrieval(conn, good.retrieval_id) is not None
+        assert conn.execute("SELECT count(*) FROM retrievals").fetchone()[0] == 1
+        assert retrieval_log.verify_chain(conn) == (True, None)
+    finally:
+        retrieval_log.stop_writer()
+        conn.close()
+
+
+def test_writer_can_stop_repeatedly_and_restart(tmp_path):
+    path = str(tmp_path / "restart.db")
+    conn = db.connect(path)
+    for _ in range(3):
+        retrieval_log.stop_writer()
+        retrieval_log.stop_writer()
+        retrieval_log.start_writer(path)
+        record = retrieval_log.write_retrieval(conn, "q", "same", "a", "pubmed", {}, "x", {})
+        assert retrieval_log.get_retrieval(conn, record.retrieval_id) is not None
+        retrieval_log.stop_writer()
+    assert conn.execute("SELECT count(*) FROM retrievals").fetchone()[0] == 3
+    assert retrieval_log.verify_chain(conn) == (True, None)
+    conn.close()
