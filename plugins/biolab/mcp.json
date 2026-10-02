@@ -1,0 +1,9 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "biolab": {
+      "type": "streamable-http",
+      "url": "https://srikarjy025-biolab-mcp.hf.space/mcp"
+    }
+  }
+}

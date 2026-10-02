@@ -1,7 +1,9 @@
 """Thin wrapper over the Europe PMC REST API. No logging, no DB access — see retrieval_log.py."""
 
 import hashlib
+import time
 from dataclasses import dataclass
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import urlopen
 
@@ -10,6 +12,21 @@ import defusedxml.ElementTree as SafeET  # parses untrusted network XML; guards 
 SEARCH_URL = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 FETCH_URL_TEMPLATE = "https://www.ebi.ac.uk/europepmc/webservices/rest/{id}/fullTextXML"
 TIMEOUT_SECONDS = 15
+RETRIES = 3
+RETRY_BACKOFF_SECONDS = 1.0
+
+
+def _urlopen_with_retry(url: str):
+    """Retry transient Europe PMC timeouts and 429/5xx service responses."""
+    for attempt in range(RETRIES + 1):
+        try:
+            return urlopen(url, timeout=TIMEOUT_SECONDS)
+        except (TimeoutError, URLError, HTTPError) as exc:
+            retryable = not isinstance(exc, HTTPError) or exc.code == 429 or exc.code >= 500
+            if not retryable or attempt == RETRIES:
+                raise
+            time.sleep(RETRY_BACKOFF_SECONDS * (attempt + 1))
+    raise RuntimeError("unreachable")
 
 
 @dataclass
@@ -37,7 +54,7 @@ def search(query: str, max_results: int) -> list:
         "pageSize": max_results,
         "resultType": "lite",
     })
-    with urlopen(f"{SEARCH_URL}?{params}", timeout=TIMEOUT_SECONDS) as resp:
+    with _urlopen_with_retry(f"{SEARCH_URL}?{params}") as resp:
         root = SafeET.fromstring(resp.read())
     return root.findall(".//resultList/result")
 

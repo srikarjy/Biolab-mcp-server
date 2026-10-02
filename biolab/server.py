@@ -1,8 +1,10 @@
-"""MCP server entrypoint. Registers the search_pubmed and get_retrieval tools."""
+"""MCP, REST, and dashboard server for the Biolab evidence workspace."""
 
+import json
 import os
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 from starlette.responses import JSONResponse
 
 from biolab import (
@@ -13,7 +15,10 @@ from biolab import (
     europepmc_client,
     pubmed_client,
     retrieval_log,
+    web,
+    workspace,
 )
+from biolab import evidence as evidence_service
 
 DB_PATH = os.environ.get("BIOLAB_DB_PATH", "biolab.db")
 MAX_RESULTS_CAP = 50  # hard ceiling — an uncapped max_results lets a caller force
@@ -30,8 +35,208 @@ _conn = db.connect(DB_PATH)
 # Start background writer for thread-safe DB writes
 retrieval_log.start_writer(DB_PATH)
 
+SEARCH_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=True,
+)
+READ_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=True,
+    destructiveHint=False,
+    idempotentHint=True,
+    openWorldHint=False,
+)
+WRITE_ANNOTATIONS = ToolAnnotations(
+    readOnlyHint=False,
+    destructiveHint=False,
+    idempotentHint=False,
+    openWorldHint=False,
+)
 
-@mcp.tool()
+
+@mcp.tool(annotations=SEARCH_ANNOTATIONS)
+def search_evidence(
+    query: str,
+    agent_id: str,
+    sources: list[str] | None = None,
+    max_results: int = 5,
+) -> dict:
+    """Search several scientific sources in one explicitly audited workflow.
+
+    Args:
+        query: scientific evidence query sent to each selected source
+        agent_id: calling agent or workflow identity
+        sources: any of pubmed, europepmc, clinicaltrials, uniprot, opentargets
+        max_results: maximum results to preserve per source (1-50)
+    """
+    return evidence_service.search_evidence(
+        _conn,
+        query=query,
+        agent_id=agent_id,
+        sources=sources or list(evidence_service.SUPPORTED_SOURCES),
+        max_results=max_results,
+    )
+
+
+@mcp.tool(name="search", annotations=SEARCH_ANNOTATIONS)
+def plugin_search(query: str) -> dict:
+    """Search all evidence sources for ChatGPT/Codex knowledge compatibility."""
+    result = evidence_service.search_evidence(
+        _conn, query, "openai:search", list(evidence_service.SUPPORTED_SOURCES), 5
+    )
+    flattened = []
+    for records in result["sources"].values():
+        for record in records:
+            snapshot = record["snapshot"]
+            flattened.append({
+                "id": record["retrieval_id"],
+                "title": snapshot.get("title") or snapshot.get("name") or record["external_id"],
+                "url": snapshot.get("canonical_url") or snapshot.get("url"),
+            })
+    return {"results": flattened, "errors": result["errors"]}
+
+
+@mcp.tool(name="fetch", annotations=READ_ANNOTATIONS)
+def plugin_fetch(id: str) -> dict:  # noqa: A002 - MCP knowledge-tool schema calls this field id
+    """Fetch one preserved evidence record by retrieval ID."""
+    record = retrieval_log.get_retrieval(_conn, id)
+    if record is None:
+        raise ValueError("retrieval not found")
+    snapshot = json.loads(record.snapshot)
+    return {
+        "id": record.retrieval_id,
+        "title": snapshot.get("title") or snapshot.get("name") or record.external_id,
+        "text": record.snapshot,
+        "url": snapshot.get("canonical_url") or snapshot.get("url"),
+        "metadata": {
+            "source": record.source,
+            "external_id": record.external_id,
+            "retrieved_at": record.retrieved_at,
+            "response_hash": record.response_hash,
+        },
+    }
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def create_project(name: str, description: str = "") -> dict:
+    """Create a persistent scientist research project."""
+    return workspace.create_project(_conn, name, description)
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def list_projects() -> dict:
+    """List scientist research projects."""
+    return {"projects": workspace.list_projects(_conn)}
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def create_evidence_collection(project_id: str, name: str, description: str = "") -> dict:
+    """Create a reviewed evidence collection in a project."""
+    return workspace.create_collection(_conn, project_id, name, description)
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def list_evidence_collections(project_id: str | None = None) -> dict:
+    """List evidence collections, optionally within one project."""
+    return {"collections": workspace.list_collections(_conn, project_id)}
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def add_evidence_to_collection(
+    collection_id: str,
+    retrieval_id: str,
+    relevance: str = "unreviewed",
+    note: str = "",
+) -> dict:
+    """Add or update a retrieval in a scientist-reviewed evidence collection."""
+    return workspace.add_collection_item(_conn, collection_id, retrieval_id, note, relevance)
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_evidence_collection(collection_id: str) -> dict:
+    """Return a collection and its reviewed evidence items."""
+    collection = workspace.get_collection(_conn, collection_id)
+    if collection is None:
+        raise ValueError("collection not found")
+    return collection
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def create_evidence_watch(
+    project_id: str,
+    source: str,
+    query: str,
+    agent_id: str,
+    max_results: int = 10,
+) -> dict:
+    """Create a saved query for explicit evidence-change monitoring."""
+    return workspace.create_watch(_conn, project_id, source, query, agent_id, max_results)
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def list_evidence_watches(project_id: str | None = None) -> dict:
+    """List saved evidence watches, optionally within one project."""
+    return {"watches": workspace.list_watches(_conn, project_id)}
+
+
+@mcp.tool(annotations=SEARCH_ANNOTATIONS)
+def run_evidence_watch(watch_id: str) -> dict:
+    """Run one evidence watch and record added, removed, or revised evidence."""
+    return workspace.run_watch(_conn, watch_id)
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def list_evidence_events(watch_id: str) -> dict:
+    """List change events previously detected by an evidence watch."""
+    return {"events": workspace.list_watch_events(_conn, watch_id)}
+
+
+@mcp.tool(annotations=SEARCH_ANNOTATIONS)
+def run_all_evidence_watches() -> dict:
+    """Run all active watches and return explicit per-watch failures."""
+    return workspace.run_active_watches(_conn)
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def create_claim(project_id: str, claim: str) -> dict:
+    """Create a scientific claim record without asserting that it is true."""
+    return workspace.create_claim(_conn, project_id, claim)
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def link_claim_evidence(
+    claim_id: str,
+    retrieval_id: str,
+    stance: str,
+    assessment: str = "agent_proposed",
+    note: str = "",
+) -> dict:
+    """Propose or record how one retrieval relates to a claim."""
+    return workspace.link_claim_evidence(
+        _conn, claim_id, retrieval_id, stance, assessment, note
+    )
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def trace_claim(claim_id: str) -> dict:
+    """Trace a claim to supporting, conflicting, contextual, or insufficient evidence."""
+    result = workspace.trace_claim(_conn, claim_id)
+    if result is None:
+        raise ValueError("claim not found")
+    return result
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_project_report(project_id: str) -> dict:
+    """Return collections, claims, evidence links, watches, and events for a project."""
+    result = workspace.get_project_report(_conn, project_id)
+    if result is None:
+        raise ValueError("project not found")
+    return result
+
+
+@mcp.tool(annotations=SEARCH_ANNOTATIONS)
 def search_pubmed(query: str, agent_id: str, max_results: int = 5) -> dict:
     """Search PubMed and log every retrieved paper to the audit trail.
 
@@ -74,7 +279,7 @@ def search_pubmed(query: str, agent_id: str, max_results: int = 5) -> dict:
     return {"query_echo": query, "papers": results}
 
 
-@mcp.tool()
+@mcp.tool(annotations=SEARCH_ANNOTATIONS)
 def search_europepmc(query: str, agent_id: str, max_results: int = 5) -> dict:
     """Search Europe PMC and log every retrieved article to the audit trail.
 
@@ -117,7 +322,7 @@ def search_europepmc(query: str, agent_id: str, max_results: int = 5) -> dict:
     return {"query_echo": query, "articles": results}
 
 
-@mcp.tool()
+@mcp.tool(annotations=SEARCH_ANNOTATIONS)
 def search_clinicaltrials(query: str, agent_id: str, max_results: int = 5) -> dict:
     """Search ClinicalTrials.gov and log every retrieved study to the audit trail.
 
@@ -161,7 +366,7 @@ def search_clinicaltrials(query: str, agent_id: str, max_results: int = 5) -> di
     return {"query_echo": query, "studies": results}
 
 
-@mcp.tool()
+@mcp.tool(annotations=SEARCH_ANNOTATIONS)
 def search_biorxiv(category: str, agent_id: str, max_results: int = 5, server: str = "biorxiv") -> dict:
     """List bioRxiv/medRxiv preprints by category and log each to the audit trail.
 
@@ -211,7 +416,7 @@ def search_biorxiv(category: str, agent_id: str, max_results: int = 5, server: s
     return {"category_echo": category, "preprints": results}
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ANNOTATIONS)
 def get_retrieval(retrieval_id: str) -> dict:
     """Retrieve a full retrieval record by its retrieval_id.
 
@@ -225,7 +430,6 @@ def get_retrieval(retrieval_id: str) -> dict:
     if record is None:
         raise ValueError(f"no retrieval found for id: {retrieval_id!r}")
 
-    import json
     return {
         "retrieval_id": record.retrieval_id,
         "source": record.source,
@@ -237,6 +441,7 @@ def get_retrieval(retrieval_id: str) -> dict:
         "raw_response": record.raw_response,
         "snapshot": json.loads(record.snapshot),
         "response_hash": record.response_hash,
+        "prev_hash": record.prev_hash,
     }
 
 
@@ -257,9 +462,16 @@ class ApiKeyAuthMiddleware:
 
     def __init__(self, app):
         self.app = app
+        self.require_auth = os.environ.get("BIOLAB_REQUIRE_AUTH", "").lower() in {
+            "1", "true", "yes"
+        }
 
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        if scope.get("path", "") in {"/", "/health", "/openapi.json"}:
             await self.app(scope, receive, send)
             return
 
@@ -274,6 +486,10 @@ class ApiKeyAuthMiddleware:
                 await response(scope, receive, send)
                 return
             identity = resolved
+        elif self.require_auth:
+            response = JSONResponse({"error": "API key required"}, status_code=401)
+            await response(scope, receive, send)
+            return
 
         token = auth.current_identity.set(identity)
         try:
@@ -282,11 +498,19 @@ class ApiKeyAuthMiddleware:
             auth.current_identity.reset(token)
 
 
+def create_hosted_app():
+    """Create one ASGI app serving MCP, REST, health, and the dashboard."""
+    app = mcp.streamable_http_app()
+    app.state.conn = _conn
+    app.routes.extend(web.api_routes())
+    app.add_middleware(ApiKeyAuthMiddleware)
+    return app
+
+
 if __name__ == "__main__":
     import uvicorn
 
-    app = mcp.streamable_http_app()
-    app.add_middleware(ApiKeyAuthMiddleware)
+    app = create_hosted_app()
 
     try:
         uvicorn.run(app, host=mcp.settings.host, port=mcp.settings.port)

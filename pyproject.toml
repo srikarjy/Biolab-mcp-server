@@ -4,17 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "biolab-mcp"
-version = "0.3.0"
-description = "MCP server for auditable biological database queries — every retrieval logged with full context"
+version = "0.4.0"
+description = "Local-first scientific evidence workspace with auditable retrieval, monitoring, and provenance"
 readme = "README.md"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "Srikar Jy", email = "srikarjy025@gmail.com"}
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
@@ -26,7 +25,6 @@ dependencies = [
     "defusedxml>=0.7.1",
     "typer>=0.12",
     "rich>=13.7",
-    "libsql>=0.1.11",
     "starlette>=0.27",
     "uvicorn>=0.31.1",
 ]
@@ -40,6 +38,9 @@ dev = [
 ]
 server = [
     "mcp[cli]>=1.28",
+]
+turso = [
+    "libsql>=0.1.11",
 ]
 
 [project.entry-points]
@@ -62,11 +63,15 @@ filterwarnings = [
 ]
 markers = [
     "benchmark: performance benchmark (needs pytest-benchmark; excluded from CI, run manually with -m benchmark)",
+    "live: requires public network access or local socket binding",
 ]
 
 [tool.ruff]
 target-version = "py311"
 line-length = 100
+src = ["biolab"]
+
+[tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C4", "PTH", "PL", "TRY", "SIM", "T20"]
 ignore = [
     "E501",
@@ -81,8 +86,6 @@ ignore = [
     "T201",     # migrations/001_v2_schema.py is a one-shot CLI script; print is its UI
     "B008",     # typer.Argument()/typer.Option() in defaults is the typer-idiomatic pattern
 ]
-src = ["biolab"]
-
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"

@@ -12,11 +12,13 @@ WORKDIR /app
 COPY pyproject.toml LICENSE README.md ./
 COPY biolab ./biolab
 
-RUN pip install --no-cache-dir .
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential cmake \
+    && pip install --no-cache-dir ".[turso]" \
+    && apt-get purge -y --auto-remove build-essential cmake \
+    && rm -rf /var/lib/apt/lists/*
 
-# Storage is remote (Turso, via TURSO_DATABASE_URL/TURSO_AUTH_TOKEN Space secrets);
-# BIOLAB_DB_PATH is only a placeholder used before those env vars resolve the
-# real target — see biolab/db.py resolve_target().
+# This hosted image includes the optional Turso driver for durable Space storage.
 ENV BIOLAB_HOST=0.0.0.0
 ENV BIOLAB_PORT=8000
 ENV BIOLAB_DB_PATH=/tmp/biolab.db

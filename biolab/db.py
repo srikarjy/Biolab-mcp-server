@@ -1,15 +1,12 @@
-"""libSQL connection and schema setup.
+"""SQLite/libSQL connection and schema setup.
 
-Uses the `libsql` package (SQLite-compatible, DB-API-like) so the same code path
-works against a local file and a remote Turso database. When TURSO_DATABASE_URL
-is set, that takes precedence over the given local db_path; otherwise db_path is
-used as a plain local SQLite/libSQL file, same as before.
+Local use relies on Python's standard-library SQLite. The optional ``turso``
+extra supplies libSQL only when a remote TURSO_DATABASE_URL is configured.
 """
 
 import os
+import sqlite3
 from typing import Any
-
-import libsql
 
 SCHEMA_V2 = """
 CREATE TABLE IF NOT EXISTS retrievals (
@@ -38,6 +35,85 @@ CREATE TABLE IF NOT EXISTS api_keys (
     created_at  TEXT NOT NULL,
     revoked     INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS projects (
+    project_id   TEXT PRIMARY KEY,
+    name         TEXT NOT NULL,
+    description  TEXT NOT NULL DEFAULT '',
+    created_at   TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS evidence_collections (
+    collection_id TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL,
+    name          TEXT NOT NULL,
+    description   TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+
+CREATE TABLE IF NOT EXISTS collection_items (
+    collection_id TEXT NOT NULL,
+    retrieval_id  TEXT NOT NULL,
+    note          TEXT NOT NULL DEFAULT '',
+    relevance     TEXT NOT NULL DEFAULT 'unreviewed',
+    added_at      TEXT NOT NULL,
+    PRIMARY KEY (collection_id, retrieval_id),
+    FOREIGN KEY (collection_id) REFERENCES evidence_collections(collection_id),
+    FOREIGN KEY (retrieval_id) REFERENCES retrievals(retrieval_id)
+);
+
+CREATE TABLE IF NOT EXISTS evidence_watches (
+    watch_id          TEXT PRIMARY KEY,
+    project_id        TEXT NOT NULL,
+    source            TEXT NOT NULL,
+    query_text        TEXT NOT NULL,
+    agent_id          TEXT NOT NULL,
+    max_results       INTEGER NOT NULL,
+    active            INTEGER NOT NULL DEFAULT 1,
+    previous_ids      TEXT NOT NULL DEFAULT '[]',
+    created_at        TEXT NOT NULL,
+    last_checked_at   TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+
+CREATE TABLE IF NOT EXISTS evidence_events (
+    event_id       TEXT PRIMARY KEY,
+    watch_id       TEXT NOT NULL,
+    event_type     TEXT NOT NULL,
+    external_id    TEXT NOT NULL,
+    retrieval_id   TEXT,
+    payload        TEXT NOT NULL,
+    detected_at    TEXT NOT NULL,
+    FOREIGN KEY (watch_id) REFERENCES evidence_watches(watch_id)
+);
+
+CREATE TABLE IF NOT EXISTS claims (
+    claim_id      TEXT PRIMARY KEY,
+    project_id    TEXT NOT NULL,
+    claim_text    TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+
+CREATE TABLE IF NOT EXISTS claim_evidence (
+    claim_id       TEXT NOT NULL,
+    retrieval_id   TEXT NOT NULL,
+    stance         TEXT NOT NULL,
+    assessment     TEXT NOT NULL DEFAULT 'unreviewed',
+    note           TEXT NOT NULL DEFAULT '',
+    added_at       TEXT NOT NULL,
+    PRIMARY KEY (claim_id, retrieval_id),
+    FOREIGN KEY (claim_id) REFERENCES claims(claim_id),
+    FOREIGN KEY (retrieval_id) REFERENCES retrievals(retrieval_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_collections_project ON evidence_collections(project_id);
+CREATE INDEX IF NOT EXISTS idx_collection_items_retrieval ON collection_items(retrieval_id);
+CREATE INDEX IF NOT EXISTS idx_watches_project ON evidence_watches(project_id);
+CREATE INDEX IF NOT EXISTS idx_events_watch ON evidence_events(watch_id, detected_at);
+CREATE INDEX IF NOT EXISTS idx_claims_project ON claims(project_id);
+CREATE INDEX IF NOT EXISTS idx_claim_evidence_retrieval ON claim_evidence(retrieval_id);
 """
 
 # Tracks the target (Turso URL or local path) most recently connected to, so
@@ -60,11 +136,24 @@ def current_target() -> str | None:
     return _current_target
 
 
+def open_connection(target: str, token: str | None = None) -> Any:
+    """Open a local SQLite connection or an optional remote libSQL connection."""
+    if token or target.startswith(("libsql://", "https://")):
+        try:
+            import libsql
+        except ImportError as exc:
+            raise RuntimeError(
+                "Remote Turso storage requires: pip install 'biolab-mcp[turso]'"
+            ) from exc
+        return libsql.connect(target, auth_token=token) if token else libsql.connect(target)
+    return sqlite3.connect(target, check_same_thread=False)
+
+
 def connect(db_path: str) -> Any:
     global _current_target
     target, token = resolve_target(db_path)
 
-    conn = libsql.connect(target, auth_token=token) if token else libsql.connect(target)
+    conn = open_connection(target, token)
     conn.executescript(SCHEMA_V2)
     conn.commit()
     _current_target = target
