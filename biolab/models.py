@@ -16,3 +16,4 @@ class RetrievalRecord:
     snapshot: str  # JSON string
     response_hash: str
     prev_hash: str  # response_hash of the previous row in the chain; "" for the first row
+    hash_version: int = 2  # 1 = legacy (raw_response only); 2 = every audited column

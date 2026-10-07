@@ -32,7 +32,7 @@ def _free_port() -> int:
 
 
 @contextlib.asynccontextmanager
-async def _running_server(db_path: str):
+async def _running_server(db_path: str, extra_env: dict | None = None):
     port = _free_port()
     proc = subprocess.Popen(
         [sys.executable, "-m", "biolab.server"],
@@ -42,6 +42,7 @@ async def _running_server(db_path: str):
             "BIOLAB_DB_PATH": db_path,
             "BIOLAB_HOST": "127.0.0.1",
             "BIOLAB_PORT": str(port),
+            **(extra_env or {}),
         },
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -179,3 +180,69 @@ async def test_search_biorxiv_live_end_to_end(tmp_path):
         assert preprint["title"]
 
     assert _row_count(db_path) == 2
+
+
+async def _watch_agent_id(db_path: str, api_key: str | None, spoofed: str) -> str:
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    async with (
+        _running_server(db_path) as url,
+        httpx.AsyncClient(headers=headers) as http_client,
+        streamable_http_client(url, http_client=http_client) as (read, write, _),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
+        project = await session.call_tool("create_project", {"name": "p"})
+        project_id = json.loads(project.content[0].text)["project_id"]
+        watch = await session.call_tool(
+            "create_evidence_watch",
+            {"project_id": project_id, "source": "pubmed", "query": "q", "agent_id": spoofed},
+        )
+        assert watch.isError is False, watch.content
+        return json.loads(watch.content[0].text)["agent_id"]
+
+
+@pytest.mark.asyncio
+async def test_authenticated_caller_cannot_spoof_agent_id_over_mcp(tmp_path):
+    from biolab import auth, db
+
+    db_path = str(tmp_path / "test.db")
+    conn = db.connect(db_path)
+    key = auth.create_api_key(conn, "alice", "agent:alice")
+    conn.close()
+
+    assert await _watch_agent_id(db_path, key, "agent:mallory") == "agent:alice"
+
+
+@pytest.mark.asyncio
+async def test_anonymous_caller_keeps_declared_agent_id_over_mcp(tmp_path):
+    assert await _watch_agent_id(str(tmp_path / "test.db"), None, "agent:declared") == "agent:declared"
+
+
+@pytest.mark.asyncio
+async def test_run_tool_seals_a_record_and_replays_over_mcp(tmp_path):
+    db_path = str(tmp_path / "test.db")
+    env = {"BIOLAB_ARTIFACT_DIR": str(tmp_path / "artifacts")}
+    async with (
+        _running_server(db_path, env) as url,
+        streamable_http_client(url) as (read, write, _),
+        ClientSession(read, write) as session,
+    ):
+        await session.initialize()
+        run = await session.call_tool(
+            "run_tool",
+            {"tool": "sequence_stats", "inputs": {"sequence": "MKTAYIAK"}, "agent_id": "t:a"},
+        )
+        assert run.isError is False, run.content
+        record = json.loads(run.content[0].text)
+        assert record["status"] == "succeeded"
+
+        artifact = await session.call_tool("get_artifact", {"sha256": record["outputs"][0]["sha256"]})
+        assert json.loads(json.loads(artifact.content[0].text)["text"])["type"] == "protein"
+
+        verify = json.loads((await session.call_tool("verify_executions", {})).content[0].text)
+        assert verify == {"valid": True, "first_broken_execution_id": None}
+        replay = json.loads(
+            (await session.call_tool("replay_execution", {"execution_id": record["execution_id"]}))
+            .content[0].text
+        )
+        assert replay["reproduced"] is True

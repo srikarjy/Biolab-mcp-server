@@ -20,6 +20,9 @@ RUN apt-get update \
 
 # This hosted image includes the optional Turso driver for durable Space storage.
 ENV BIOLAB_HOST=0.0.0.0
+# The public demo Space is intentionally anonymous; every other deployment must set
+# BIOLAB_REQUIRE_AUTH=true instead (see biolab.server.check_exposure).
+ENV BIOLAB_ALLOW_ANONYMOUS=true
 ENV BIOLAB_PORT=8000
 ENV BIOLAB_DB_PATH=/tmp/biolab.db
 

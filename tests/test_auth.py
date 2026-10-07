@@ -47,3 +47,26 @@ def test_two_different_keys_hash_to_different_rows(tmp_path):
 
     rows = auth.list_api_keys(conn)
     assert {r["label"] for r in rows} == {"alice", "bob"}
+
+
+def test_check_exposure_allows_loopback_and_refuses_open_public_bind():
+    import pytest
+    from biolab.server import check_exposure
+
+    check_exposure("127.0.0.1", {})
+    with pytest.raises(SystemExit):
+        check_exposure("0.0.0.0", {})
+    check_exposure("0.0.0.0", {"BIOLAB_REQUIRE_AUTH": "true"})
+    check_exposure("0.0.0.0", {"BIOLAB_ALLOW_ANONYMOUS": "1"})
+
+
+def test_bind_agent_id_prefers_verified_identity():
+    from biolab import auth
+
+    class Req:
+        scope = {"biolab_identity": "agent:alice"}
+
+    assert auth.bind_agent_id("agent:mallory", Req()) == "agent:alice"
+    assert auth.bind_agent_id("agent:declared", None) == "agent:declared"
+    Anon = type("Anon", (), {"scope": {"biolab_identity": "anonymous"}})
+    assert auth.bind_agent_id("agent:declared", Anon()) == "agent:declared"

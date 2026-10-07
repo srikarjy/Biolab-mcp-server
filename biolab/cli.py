@@ -753,6 +753,59 @@ def verify(
     console.print(f"[green]Chain valid: {count} records[/green]")
 
 
+def _anchor_key() -> bytes:
+    import os
+
+    key = os.environ.get("BIOLAB_ANCHOR_KEY", "")
+    if not key:
+        console.print("[red]Set BIOLAB_ANCHOR_KEY to sign and check anchors.[/red]")
+        raise typer.Exit(2)
+    return key.encode("utf-8")
+
+
+@app.command()
+def anchor(
+    out: Path = typer.Argument(..., help="File to write the signed chain-head checkpoint to"),
+    db_path: str = typer.Option("biolab.db", "--db", help="Database to checkpoint"),
+):
+    """Write a signed checkpoint of the chain head. Store it outside the database host."""
+    key = _anchor_key()
+    conn = db.connect(db_path)
+    try:
+        ok, broken_id = retrieval_log.verify_chain(conn)
+        if not ok:
+            console.print(f"[red]Refusing to anchor a broken chain (at {broken_id})[/red]")
+            raise typer.Exit(1)
+        checkpoint = retrieval_log.make_anchor(conn, key)
+    finally:
+        conn.close()
+    out.write_text(json.dumps(checkpoint, indent=2) + "\n")
+    console.print(f"[green]Anchored {checkpoint['count']} records -> {out}[/green]")
+
+
+@app.command(name="verify-anchor")
+def verify_anchor_cmd(
+    anchor_file: Path = typer.Argument(..., help="Checkpoint written by `biolab anchor`"),
+    db_path: str = typer.Option("biolab.db", "--db", help="Database to check"),
+):
+    """Check the chain, and that it still extends a previously saved checkpoint."""
+    key = _anchor_key()
+    checkpoint = json.loads(anchor_file.read_text())
+    conn = db.connect(db_path)
+    try:
+        chain_ok, broken_id = retrieval_log.verify_chain(conn)
+        anchor_ok, reason = retrieval_log.verify_anchor(conn, checkpoint, key)
+    finally:
+        conn.close()
+    if not chain_ok:
+        console.print(f"[red]Chain broken at {broken_id}[/red]")
+    if not anchor_ok:
+        console.print(f"[red]Anchor check failed: {reason}[/red]")
+    if not (chain_ok and anchor_ok):
+        raise typer.Exit(1)
+    console.print(f"[green]OK: {reason}[/green]")
+
+
 @app.command(name="portfolio-demo")
 def portfolio_demo():
     """Run an isolated, offline provenance and tamper-detection demonstration."""

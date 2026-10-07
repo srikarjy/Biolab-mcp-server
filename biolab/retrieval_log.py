@@ -6,6 +6,8 @@ the tool call rather than risking a paper returned without a retrieval_id.
 Includes a write-queue for concurrent access safety (v2+).
 """
 
+import hashlib
+import hmac
 import json
 import queue
 import threading
@@ -75,6 +77,45 @@ def stop_writer() -> None:
     _writer_db_path = None
 
 
+HASH_VERSION = 2
+
+
+def compute_hash(
+    version: int,
+    prev_hash: str,
+    retrieval_id: str,
+    source: str,
+    external_id: str,
+    query_text: str,
+    retrieved_at: str,
+    agent_id: str,
+    source_metadata: str,
+    raw_response: str,
+    snapshot: str,
+) -> str:
+    """The chained hash of one retrieval row.
+
+    Version 1 (legacy rows) covered only raw_response, so query, caller identity and the
+    normalized snapshot could be rewritten without breaking verification. Version 2
+    hashes every audited column as a JSON array, which is unambiguous (no field can
+    bleed into its neighbour) and stable across Python versions.
+    """
+    if version == 1:
+        material = prev_hash + raw_response + retrieval_id + retrieved_at
+    elif version == 2:
+        material = json.dumps(
+            [
+                "biolab-retrieval-v2", prev_hash, retrieval_id, source, external_id,
+                query_text, retrieved_at, agent_id, source_metadata, raw_response, snapshot,
+            ],
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+    else:
+        raise ValueError(f"unknown hash_version {version}")
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
 def get_last_hash(conn: Any) -> str:
     """The response_hash of the most recently inserted row, or "" if the table is empty.
 
@@ -92,21 +133,21 @@ def _chain_and_insert(conn: Any, record: RetrievalRecord) -> None:
     _write_sync) so that reading the last hash and inserting the next row is
     never interleaved with another writer doing the same (AD-9).
     """
-    import hashlib
-
     record.prev_hash = get_last_hash(conn)
-    record.response_hash = hashlib.sha256(
-        (record.prev_hash + record.raw_response + record.retrieval_id + record.retrieved_at).encode(
-            "utf-8"
-        )
-    ).hexdigest()
+    record.hash_version = HASH_VERSION
+    record.response_hash = compute_hash(
+        record.hash_version, record.prev_hash, record.retrieval_id, record.source,
+        record.external_id, record.query_text, record.retrieved_at, record.agent_id,
+        record.source_metadata, record.raw_response, record.snapshot,
+    )
 
     conn.execute(
         """
         INSERT INTO retrievals
             (retrieval_id, source, external_id, query_text, retrieved_at,
-             agent_id, source_metadata, raw_response, snapshot, response_hash, prev_hash)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             agent_id, source_metadata, raw_response, snapshot, response_hash, prev_hash,
+             hash_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             record.retrieval_id,
@@ -120,6 +161,7 @@ def _chain_and_insert(conn: Any, record: RetrievalRecord) -> None:
             record.snapshot,
             record.response_hash,
             record.prev_hash,
+            record.hash_version,
         ),
     )
 
@@ -148,27 +190,81 @@ def verify_chain(conn: Any) -> tuple[bool, str | None]:
     prev_hash produces (i.e. the row itself, or a row before it, was tampered
     with or deleted).
     """
-    import hashlib
-
     rows = conn.execute(
         """
-        SELECT retrieval_id, raw_response, retrieved_at, prev_hash, response_hash
+        SELECT retrieval_id, source, external_id, query_text, retrieved_at, agent_id,
+               source_metadata, raw_response, snapshot, prev_hash, response_hash, hash_version
         FROM retrievals ORDER BY rowid ASC
         """
     ).fetchall()
 
     expected_prev = ""
-    for retrieval_id, raw_response, retrieved_at, prev_hash, response_hash in rows:
+    for row in rows:
+        (retrieval_id, source, external_id, query_text, retrieved_at, agent_id,
+         source_metadata, raw_response, snapshot, prev_hash, response_hash, version) = row
         if prev_hash != expected_prev:
             return False, retrieval_id
-        recomputed = hashlib.sha256(
-            (prev_hash + raw_response + retrieval_id + retrieved_at).encode("utf-8")
-        ).hexdigest()
+        try:
+            recomputed = compute_hash(
+                version, prev_hash, retrieval_id, source, external_id, query_text,
+                retrieved_at, agent_id, source_metadata, raw_response, snapshot,
+            )
+        except ValueError:
+            return False, retrieval_id
         if recomputed != response_hash:
             return False, retrieval_id
         expected_prev = response_hash
 
     return True, None
+
+
+def make_anchor(conn: Any, key: bytes) -> dict:
+    """A signed checkpoint of the chain head, to be stored OUTSIDE the database.
+
+    verify_chain alone cannot see rows deleted from the tail or a wholesale rewrite
+    that recomputes every hash. A checkpoint held elsewhere (a file, a ticket, a
+    git commit) pins "the log had at least N rows and row N hashed to H".
+    """
+    row = conn.execute("SELECT count(*) FROM retrievals").fetchone()
+    count = row[0]
+    anchor = {
+        "version": 1,
+        "count": count,
+        "head_hash": get_last_hash(conn),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    anchor["hmac"] = _anchor_mac(anchor, key)
+    return anchor
+
+
+def _anchor_mac(anchor: dict, key: bytes) -> str:
+    body = json.dumps(
+        [anchor["version"], anchor["count"], anchor["head_hash"], anchor["created_at"]],
+        separators=(",", ":"),
+    )
+    return hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def verify_anchor(conn: Any, anchor: dict, key: bytes) -> tuple[bool, str]:
+    """Check the live log against a checkpoint. Returns (ok, human-readable reason)."""
+    try:
+        expected = _anchor_mac(anchor, key)
+    except (KeyError, TypeError):
+        return False, "malformed anchor"
+    if not hmac.compare_digest(expected, str(anchor.get("hmac", ""))):
+        return False, "anchor signature invalid (wrong key or edited anchor)"
+    count = anchor["count"]
+    if count == 0:
+        return True, "anchor predates any records"
+    rows = conn.execute(
+        "SELECT response_hash FROM retrievals ORDER BY rowid ASC LIMIT 1 OFFSET ?", (count - 1,)
+    ).fetchall()
+    if not rows:
+        total = conn.execute("SELECT count(*) FROM retrievals").fetchone()[0]
+        return False, f"log truncated: anchor covers {count} records, log has {total}"
+    if rows[0][0] != anchor["head_hash"]:
+        return False, f"record {count} no longer matches the anchored hash (log rewritten)"
+    return True, f"log extends the anchored head at record {count}"
 
 
 def write_retrieval(
@@ -222,7 +318,8 @@ def get_retrieval(conn: Any, retrieval_id: str) -> RetrievalRecord | None:
     row = conn.execute(
         """
         SELECT retrieval_id, source, external_id, query_text, retrieved_at,
-               agent_id, source_metadata, raw_response, snapshot, response_hash, prev_hash
+               agent_id, source_metadata, raw_response, snapshot, response_hash, prev_hash,
+               hash_version
         FROM retrievals WHERE retrieval_id = ?
         """,
         (retrieval_id,),
@@ -243,4 +340,5 @@ def get_retrieval(conn: Any, retrieval_id: str) -> RetrievalRecord | None:
         snapshot=row[8],
         response_hash=row[9],
         prev_hash=row[10],
+        hash_version=row[11],
     )

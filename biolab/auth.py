@@ -65,3 +65,24 @@ def list_api_keys(conn: Any) -> list[dict]:
         {"label": r[0], "agent_id": r[1], "created_at": r[2], "revoked": bool(r[3])}
         for r in rows
     ]
+
+
+def bind_agent_id(requested: str, request: Any = None) -> str:
+    """The identity a write is attributed to.
+
+    A verified API key always wins over whatever agent_id the caller typed, so an
+    authenticated caller cannot write audit rows as someone else. Only anonymous or
+    non-HTTP (CLI/direct) callers keep the self-declared value. `request` is the
+    per-request Starlette object when available; its scope is preferred over the
+    contextvar because MCP sessions can run handlers in a task whose contextvars were
+    captured on an earlier request.
+    """
+    identity = None
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        identity = scope.get("biolab_identity")
+    if identity is None:
+        identity = current_identity.get()
+    if identity is not None and identity != "anonymous":
+        return str(identity)
+    return requested

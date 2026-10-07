@@ -339,7 +339,7 @@ All optional — the server runs with sensible defaults if you set none of these
 | `BIOLAB_DB_PATH` | Local SQLite file path (ignored if `TURSO_DATABASE_URL` is set) | `biolab.db` |
 | `TURSO_DATABASE_URL` | Optional remote [Turso](https://turso.tech) URL; requires `pip install "biolab-mcp[turso]"` | unset (uses local file) |
 | `TURSO_AUTH_TOKEN` | Auth token for the Turso database above | unset |
-| `BIOLAB_HOST` | Host the MCP server binds to | `0.0.0.0` |
+| `BIOLAB_HOST` | Host the MCP server binds to; non-loopback requires `BIOLAB_REQUIRE_AUTH=true` or `BIOLAB_ALLOW_ANONYMOUS=true` | `127.0.0.1` |
 | `BIOLAB_PORT` | Port the MCP server listens on | `8000` |
 | `BIOLAB_REQUIRE_AUTH` | Require a valid Bearer API key on MCP/REST requests | `false` |
 | `NCBI_API_KEY` | Raises the PubMed rate limit from 3 req/s to 10 req/s | unset (works fine without one) |

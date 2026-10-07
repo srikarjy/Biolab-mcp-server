@@ -2,19 +2,23 @@
 
 import json
 import os
+from collections.abc import Mapping
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 from mcp.types import ToolAnnotations
 from starlette.responses import JSONResponse
 
 from biolab import (
+    artifacts,
     auth,
     biorxiv_client,
     clinicaltrials_client,
     db,
     europepmc_client,
+    executions,
     pubmed_client,
     retrieval_log,
+    tools,
     web,
     workspace,
 )
@@ -27,10 +31,15 @@ MAX_RESULTS_CAP = 50  # hard ceiling — an uncapped max_results lets a caller f
 
 mcp = FastMCP(
     "biolab",
-    host=os.environ.get("BIOLAB_HOST", "0.0.0.0"),
+    host=os.environ.get("BIOLAB_HOST", "127.0.0.1"),
     port=int(os.environ.get("BIOLAB_PORT", "8000")),
 )
 _conn = db.connect(DB_PATH)
+
+ARTIFACT_DIR = os.environ.get("BIOLAB_ARTIFACT_DIR", "biolab_artifacts")
+_artifacts = artifacts.ArtifactStore(ARTIFACT_DIR)
+_registry = tools.default_registry()
+MAX_ARTIFACT_RETURN_BYTES = 1_000_000
 
 # Start background writer for thread-safe DB writes
 retrieval_log.start_writer(DB_PATH)
@@ -55,10 +64,20 @@ WRITE_ANNOTATIONS = ToolAnnotations(
 )
 
 
+def _bound(agent_id: str, ctx: Context) -> str:
+    """Attribute a write to the authenticated caller, not the self-declared agent_id."""
+    try:
+        request = ctx.request_context.request
+    except (ValueError, AttributeError):
+        request = None
+    return auth.bind_agent_id(agent_id, request)
+
+
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)
 def search_evidence(
     query: str,
     agent_id: str,
+    ctx: Context,
     sources: list[str] | None = None,
     max_results: int = 5,
 ) -> dict:
@@ -73,17 +92,17 @@ def search_evidence(
     return evidence_service.search_evidence(
         _conn,
         query=query,
-        agent_id=agent_id,
+        agent_id=_bound(agent_id, ctx),
         sources=sources or list(evidence_service.SUPPORTED_SOURCES),
         max_results=max_results,
     )
 
 
 @mcp.tool(name="search", annotations=SEARCH_ANNOTATIONS)
-def plugin_search(query: str) -> dict:
+def plugin_search(query: str, ctx: Context) -> dict:
     """Search all evidence sources for ChatGPT/Codex knowledge compatibility."""
     result = evidence_service.search_evidence(
-        _conn, query, "openai:search", list(evidence_service.SUPPORTED_SOURCES), 5
+        _conn, query, _bound("openai:search", ctx), list(evidence_service.SUPPORTED_SOURCES), 5
     )
     flattened = []
     for records in result["sources"].values():
@@ -168,10 +187,13 @@ def create_evidence_watch(
     source: str,
     query: str,
     agent_id: str,
+    ctx: Context,
     max_results: int = 10,
 ) -> dict:
     """Create a saved query for explicit evidence-change monitoring."""
-    return workspace.create_watch(_conn, project_id, source, query, agent_id, max_results)
+    return workspace.create_watch(
+        _conn, project_id, source, query, _bound(agent_id, ctx), max_results
+    )
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
@@ -237,7 +259,7 @@ def get_project_report(project_id: str) -> dict:
 
 
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)
-def search_pubmed(query: str, agent_id: str, max_results: int = 5) -> dict:
+def search_pubmed(query: str, agent_id: str, ctx: Context, max_results: int = 5) -> dict:
     """Search PubMed and log every retrieved paper to the audit trail.
 
     Args:
@@ -263,7 +285,7 @@ def search_pubmed(query: str, agent_id: str, max_results: int = 5) -> dict:
             _conn,
             query_text=query,
             external_id=retrieval_input["external_id"],
-            agent_id=agent_id,
+            agent_id=_bound(agent_id, ctx),
             source=retrieval_input["source"],
             source_metadata=retrieval_input["source_metadata"],
             raw_response=retrieval_input["raw_response"],
@@ -280,7 +302,7 @@ def search_pubmed(query: str, agent_id: str, max_results: int = 5) -> dict:
 
 
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)
-def search_europepmc(query: str, agent_id: str, max_results: int = 5) -> dict:
+def search_europepmc(query: str, agent_id: str, ctx: Context, max_results: int = 5) -> dict:
     """Search Europe PMC and log every retrieved article to the audit trail.
 
     Args:
@@ -306,7 +328,7 @@ def search_europepmc(query: str, agent_id: str, max_results: int = 5) -> dict:
             _conn,
             query_text=query,
             external_id=retrieval_input["external_id"],
-            agent_id=agent_id,
+            agent_id=_bound(agent_id, ctx),
             source=retrieval_input["source"],
             source_metadata=retrieval_input["source_metadata"],
             raw_response=retrieval_input["raw_response"],
@@ -323,7 +345,7 @@ def search_europepmc(query: str, agent_id: str, max_results: int = 5) -> dict:
 
 
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)
-def search_clinicaltrials(query: str, agent_id: str, max_results: int = 5) -> dict:
+def search_clinicaltrials(query: str, agent_id: str, ctx: Context, max_results: int = 5) -> dict:
     """Search ClinicalTrials.gov and log every retrieved study to the audit trail.
 
     Args:
@@ -349,7 +371,7 @@ def search_clinicaltrials(query: str, agent_id: str, max_results: int = 5) -> di
             _conn,
             query_text=query,
             external_id=retrieval_input["external_id"],
-            agent_id=agent_id,
+            agent_id=_bound(agent_id, ctx),
             source=retrieval_input["source"],
             source_metadata=retrieval_input["source_metadata"],
             raw_response=retrieval_input["raw_response"],
@@ -367,7 +389,9 @@ def search_clinicaltrials(query: str, agent_id: str, max_results: int = 5) -> di
 
 
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)
-def search_biorxiv(category: str, agent_id: str, max_results: int = 5, server: str = "biorxiv") -> dict:
+def search_biorxiv(
+    category: str, agent_id: str, ctx: Context, max_results: int = 5, server: str = "biorxiv"
+) -> dict:
     """List bioRxiv/medRxiv preprints by category and log each to the audit trail.
 
     No free-text search exists on this API — only category listing (last 30 days).
@@ -399,7 +423,7 @@ def search_biorxiv(category: str, agent_id: str, max_results: int = 5, server: s
             _conn,
             query_text=query_text,
             external_id=retrieval_input["external_id"],
-            agent_id=agent_id,
+            agent_id=_bound(agent_id, ctx),
             source=retrieval_input["source"],
             source_metadata=retrieval_input["source_metadata"],
             raw_response=retrieval_input["raw_response"],
@@ -414,6 +438,76 @@ def search_biorxiv(category: str, agent_id: str, max_results: int = 5, server: s
         })
 
     return {"category_echo": category, "preprints": results}
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def list_execution_tools() -> dict:
+    """List runnable tools with their pinned versions, containers and devices."""
+    return {
+        "tools": [
+            {"name": t.name, "version": t.version, "container": t.container, "device": t.device,
+             "deterministic": t.deterministic}
+            for t in _registry.tools.values()
+        ]
+    }
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def run_tool(
+    tool: str,
+    inputs: dict,
+    agent_id: str,
+    ctx: Context,
+    retrieval_ids: list[str] | None = None,
+) -> dict:
+    """Run a registered tool and seal an ExecutionRecord (inputs, versions, output hashes).
+
+    Args:
+        tool: tool name from list_execution_tools
+        inputs: tool inputs (JSON object); stored verbatim so the run can be replayed
+        agent_id: calling agent or workflow identity
+        retrieval_ids: evidence retrievals this run was derived from, for provenance links
+    """
+    return executions.execute(
+        _conn, _artifacts, _registry, tool, inputs, _bound(agent_id, ctx), retrieval_ids
+    )
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_execution(execution_id: str) -> dict:
+    """Fetch one execution record, including output artifact hashes."""
+    record = executions.get_execution(_conn, execution_id)
+    if record is None:
+        raise ValueError("execution not found")
+    return record
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def list_executions(tool: str | None = None, limit: int = 50) -> dict:
+    """List recent execution records, newest first."""
+    return {"executions": executions.list_executions(_conn, tool, limit)}
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_artifact(sha256: str) -> dict:
+    """Fetch an output artifact by its sha256 (text only; capped in size)."""
+    data = _artifacts.get(sha256)
+    if len(data) > MAX_ARTIFACT_RETURN_BYTES:
+        raise ValueError(f"artifact is {len(data)} bytes; limit is {MAX_ARTIFACT_RETURN_BYTES}")
+    return {"sha256": sha256, "size": len(data), "text": data.decode("utf-8", errors="replace")}
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def verify_executions() -> dict:
+    """Verify the execution hash chain and that every output artifact is intact."""
+    ok, broken = executions.verify_executions(_conn, _artifacts)
+    return {"valid": ok, "first_broken_execution_id": broken}
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def replay_execution(execution_id: str) -> dict:
+    """Re-run a recorded execution and report whether its outputs reproduced. Writes nothing."""
+    return executions.replay(_conn, _artifacts, _registry, execution_id)
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
@@ -491,11 +585,35 @@ class ApiKeyAuthMiddleware:
             await response(scope, receive, send)
             return
 
+        scope["biolab_identity"] = identity
         token = auth.current_identity.set(identity)
         try:
             await self.app(scope, receive, send)
         finally:
             auth.current_identity.reset(token)
+
+
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def check_exposure(host: str, env: Mapping[str, str] | None = None) -> None:
+    """Refuse to listen beyond loopback without auth unless anonymous access is explicit.
+
+    Anonymous callers can create projects, claims and watches and have retrievals
+    recorded under a self-declared identity. That is acceptable for a deliberately
+    public demo, never as an accident of a default.
+    """
+    env = os.environ if env is None else env
+    if host in LOOPBACK_HOSTS:
+        return
+    if env.get("BIOLAB_REQUIRE_AUTH", "").lower() in {"1", "true", "yes"}:
+        return
+    if env.get("BIOLAB_ALLOW_ANONYMOUS", "").lower() in {"1", "true", "yes"}:
+        return
+    raise SystemExit(
+        f"Refusing to listen on {host} without authentication. Set BIOLAB_REQUIRE_AUTH=true "
+        "(recommended) or BIOLAB_ALLOW_ANONYMOUS=true for a deliberately public instance."
+    )
 
 
 def create_hosted_app():
@@ -510,6 +628,7 @@ def create_hosted_app():
 if __name__ == "__main__":
     import uvicorn
 
+    check_exposure(mcp.settings.host)
     app = create_hosted_app()
 
     try:

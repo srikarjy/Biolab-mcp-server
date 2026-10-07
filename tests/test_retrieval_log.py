@@ -245,3 +245,105 @@ def test_writer_can_stop_repeatedly_and_restart(tmp_path):
     assert conn.execute("SELECT count(*) FROM retrievals").fetchone()[0] == 3
     assert retrieval_log.verify_chain(conn) == (True, None)
     conn.close()
+
+
+import hashlib  # noqa: E402
+import sqlite3  # noqa: E402
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize(
+    "column,value",
+    [
+        ("source", "europepmc"),
+        ("external_id", "999"),
+        ("query_text", "a different question"),
+        ("agent_id", "someone:else"),
+        ("source_metadata", '{"forged": true}'),
+        ("snapshot", '{"title": "forged"}'),
+        ("retrieved_at", "1999-01-01T00:00:00+00:00"),
+    ],
+)
+def test_verify_chain_detects_tampering_with_every_audited_column(tmp_path, column, value):
+    conn = db.connect(str(tmp_path / "test.db"))
+    records = [
+        retrieval_log.write_retrieval(conn, f"q{i}", str(i), "a", "pubmed", {}, "<x/>", {})
+        for i in range(3)
+    ]
+    target = records[1].retrieval_id
+
+    conn.execute(f"UPDATE retrievals SET {column} = ? WHERE retrieval_id = ?", (value, target))
+    conn.commit()
+
+    assert retrieval_log.verify_chain(conn) == (False, target)
+
+
+def test_legacy_v1_rows_still_verify_and_new_rows_chain_onto_them(tmp_path):
+    db_path = str(tmp_path / "legacy.db")
+    raw = sqlite3.connect(db_path)
+    raw.execute(
+        """CREATE TABLE retrievals (
+            retrieval_id TEXT PRIMARY KEY, source TEXT NOT NULL, external_id TEXT NOT NULL,
+            query_text TEXT NOT NULL, retrieved_at TEXT NOT NULL, agent_id TEXT NOT NULL,
+            source_metadata TEXT NOT NULL, raw_response TEXT NOT NULL, snapshot TEXT NOT NULL,
+            response_hash TEXT NOT NULL, prev_hash TEXT NOT NULL DEFAULT '')"""
+    )
+    legacy_hash = hashlib.sha256(("" + "<old/>" + "r-old" + "2026-01-01T00:00:00+00:00").encode()).hexdigest()
+    raw.execute(
+        "INSERT INTO retrievals VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        ("r-old", "pubmed", "1", "q", "2026-01-01T00:00:00+00:00", "a", "{}", "<old/>", "{}",
+         legacy_hash, ""),
+    )
+    raw.commit()
+    raw.close()
+
+    conn = db.connect(db_path)
+    assert retrieval_log.verify_chain(conn) == (True, None)
+
+    new = retrieval_log.write_retrieval(conn, "q2", "2", "a", "pubmed", {}, "<new/>", {})
+    assert new.prev_hash == legacy_hash
+    assert retrieval_log.verify_chain(conn) == (True, None)
+
+    conn.execute("UPDATE retrievals SET query_text = 'forged' WHERE retrieval_id = ?", (new.retrieval_id,))
+    conn.commit()
+    assert retrieval_log.verify_chain(conn) == (False, new.retrieval_id)
+
+
+def test_anchor_detects_tail_truncation_and_full_rewrite(tmp_path):
+    key = b"k"
+    conn = db.connect(str(tmp_path / "test.db"))
+    for i in range(5):
+        retrieval_log.write_retrieval(conn, f"q{i}", str(i), "a", "pubmed", {}, f"<{i}/>", {})
+    anchor = retrieval_log.make_anchor(conn, key)
+    assert retrieval_log.verify_anchor(conn, anchor, key)[0] is True
+
+    # growth is fine
+    retrieval_log.write_retrieval(conn, "q5", "5", "a", "pubmed", {}, "<5/>", {})
+    assert retrieval_log.verify_anchor(conn, anchor, key)[0] is True
+
+    # the chain itself stays valid after deleting the newest rows, only the anchor notices
+    conn.execute("DELETE FROM retrievals WHERE rowid > 3")
+    conn.commit()
+    assert retrieval_log.verify_chain(conn) == (True, None)
+    ok, reason = retrieval_log.verify_anchor(conn, anchor, key)
+    assert ok is False and "truncated" in reason
+
+    # a forged anchor or wrong key is rejected
+    assert retrieval_log.verify_anchor(conn, anchor, b"other")[0] is False
+    assert retrieval_log.verify_anchor(conn, {**anchor, "count": 1}, key)[0] is False
+
+
+def test_anchor_detects_a_rewritten_log_with_recomputed_hashes(tmp_path):
+    key = b"k"
+    conn = db.connect(str(tmp_path / "test.db"))
+    for i in range(3):
+        retrieval_log.write_retrieval(conn, f"q{i}", str(i), "a", "pubmed", {}, f"<{i}/>", {})
+    anchor = retrieval_log.make_anchor(conn, key)
+
+    conn.execute("DELETE FROM retrievals")
+    conn.commit()
+    for i in range(3):  # attacker replays different content through the legitimate writer
+        retrieval_log.write_retrieval(conn, f"forged{i}", str(i), "a", "pubmed", {}, f"<f{i}/>", {})
+    assert retrieval_log.verify_chain(conn) == (True, None)
+    assert retrieval_log.verify_anchor(conn, anchor, key)[0] is False
