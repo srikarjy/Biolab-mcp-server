@@ -2,6 +2,7 @@
 
 import builtins
 import json
+import os
 from pathlib import Path
 
 import typer
@@ -16,6 +17,7 @@ app = typer.Typer(
     name="biolab",
     help="Biolab MCP Server CLI — query and explore the retrieval audit trail.",
     add_completion=False,
+    pretty_exceptions_enable=False,  # main() prints one clean line for user errors
 )
 console = Console()
 
@@ -38,8 +40,11 @@ def keys_create(
     db_path: str = typer.Option("biolab.db", "--db", help="Path to SQLite database"),
 ):
     """Create a new API key. The raw key is shown once — it isn't stored anywhere retrievable."""
+    if not label.strip():
+        console.print("[red]label must not be empty[/red]")
+        raise typer.Exit(1)
     conn = db.connect(db_path)
-    raw_key = auth.create_api_key(conn, label, agent_id or label)
+    raw_key = auth.create_api_key(conn, label.strip(), (agent_id or label).strip())
     console.print(f"[green]Created key for[/green] [bold]{label}[/bold]")
     console.print(f"[bold]{raw_key}[/bold]")
     console.print("[yellow]This is shown once — save it now.[/yellow]")
@@ -79,6 +84,14 @@ def keys_revoke(
         console.print(f"[green]Revoked {count} key(s) for[/green] [bold]{label}[/bold]")
     else:
         console.print(f"[yellow]No active keys found for[/yellow] [bold]{label}[/bold]")
+        raise typer.Exit(1)
+
+
+def _require_text(value: str, what: str) -> str:
+    if not value.strip():
+        console.print(f"[red]{what} must not be empty[/red]")
+        raise typer.Exit(1)
+    return value
 
 
 def _get_conn(db_path: str):
@@ -332,6 +345,8 @@ def evidence(
     console.print_json(data=result)
     if result["errors"]:
         console.print("[yellow]Completed with explicit source errors; see errors above.[/yellow]")
+        if result["retrieval_count"] == 0:
+            raise typer.Exit(1)  # nothing was preserved: scripts must not read this as success
 
 
 @app.command()
@@ -346,11 +361,13 @@ def web(
 
     from biolab.web import create_app
 
-    if host not in {"127.0.0.1", "localhost", "::1"} and not require_auth:
-        console.print(
-            "[yellow]Warning: external binding without --require-auth exposes the REST API; "
-            "use a trusted network or enable API-key authentication.[/yellow]"
+    try:
+        auth.check_exposure(
+            host, {**os.environ, "BIOLAB_REQUIRE_AUTH": "true" if require_auth else ""}
         )
+    except SystemExit as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
     console.print(f"[green]Biolab dashboard:[/green] http://{host}:{port}")
     uvicorn.run(create_app(db_path, require_auth=require_auth), host=host, port=port)
 
@@ -365,6 +382,7 @@ def search(
     """Search PubMed and log retrievals to the audit trail."""
     from biolab.pubmed_client import paper_to_retrieval_input, search_and_fetch
 
+    _require_text(query, "query")
     if not 1 <= max_results <= 50:
         console.print("[red]max_results must be between 1 and 50[/red]")
         raise typer.Exit(1)
@@ -405,6 +423,7 @@ def search_europepmc(
     """Search Europe PMC and log retrievals to the audit trail."""
     from biolab import europepmc_client
 
+    _require_text(query, "query")
     if not 1 <= max_results <= 50:
         console.print("[red]max_results must be between 1 and 50[/red]")
         raise typer.Exit(1)
@@ -445,6 +464,7 @@ def search_clinicaltrials(
     """Search ClinicalTrials.gov and log retrievals to the audit trail."""
     from biolab import clinicaltrials_client
 
+    _require_text(query, "query")
     if not 1 <= max_results <= 50:
         console.print("[red]max_results must be between 1 and 50[/red]")
         raise typer.Exit(1)
@@ -490,6 +510,7 @@ def search_biorxiv(
     """
     from biolab import biorxiv_client
 
+    _require_text(category, "category")
     if not 1 <= max_results <= 50:
         console.print("[red]max_results must be between 1 and 50[/red]")
         raise typer.Exit(1)
@@ -818,5 +839,185 @@ def portfolio_demo():
     console.print("[green]PASS: records persisted, retrieved, and verified; tampering detected.[/green]")
 
 
+executions_app = typer.Typer(help="Inspect, verify and replay recorded tool executions.")
+app.add_typer(executions_app, name="executions")
+
+
+def _artifact_store(path: str | None):
+    from biolab.artifacts import ArtifactStore
+
+    default = os.environ.get("BIOLAB_ARTIFACT_DIR") or "biolab_artifacts"
+    return ArtifactStore(path if path else default)
+
+
+ARTIFACTS_OPTION = typer.Option(
+    None, "--artifacts", help="Artifact directory (default: $BIOLAB_ARTIFACT_DIR or ./biolab_artifacts)"
+)
+
+
+@app.command(name="tools")
+def list_tools():
+    """List runnable execution tools with pinned versions."""
+    from biolab import tools
+
+    registry = tools.default_registry()
+    table = Table(title="Execution tools")
+    for column in ("Name", "Version", "Container", "Device", "Deterministic"):
+        table.add_column(column)
+    for spec in registry.tools.values():
+        table.add_row(spec.name, spec.version, spec.container, spec.device, str(spec.deterministic))
+    console.print(table)
+
+
+@app.command(name="run-tool")
+def run_tool(
+    tool: str = typer.Argument(..., help="Tool name (see `biolab tools`)"),
+    input_json: str = typer.Option("{}", "--input", "-i", help="Tool inputs as a JSON object"),
+    input_file: Path = typer.Option(None, "--input-file", help="Read the JSON inputs from a file"),
+    agent_id: str = typer.Option("cli:user", "--agent", "-a", help="Agent identifier"),
+    retrieval_ids: builtins.list[str] = typer.Option(
+        [], "--retrieval", "-r", help="Retrieval id this run derives from (repeatable)"
+    ),
+    db_path: str = typer.Option("biolab.db", "--db", help="Path to SQLite database"),
+    artifacts: str = ARTIFACTS_OPTION,
+):
+    """Run a tool and seal an ExecutionRecord (inputs, versions, output hashes)."""
+    from biolab import executions, tools
+
+    try:
+        inputs = json.loads(input_file.read_text() if input_file else input_json)
+    except json.JSONDecodeError as exc:
+        console.print(f"[red]inputs are not valid JSON: {exc}[/red]")
+        raise typer.Exit(1) from exc
+    if not isinstance(inputs, dict):
+        console.print("[red]inputs must be a JSON object[/red]")
+        raise typer.Exit(1)
+    conn = db.connect(db_path)
+    try:
+        record = executions.execute(
+            conn, _artifact_store(artifacts), tools.default_registry(), tool, inputs,
+            agent_id, retrieval_ids,
+        )
+    finally:
+        conn.close()
+    console.print_json(data=record)
+
+
+@executions_app.command("list")
+def executions_list(
+    tool: str = typer.Option(None, "--tool", help="Filter by tool name"),
+    limit: int = typer.Option(20, "--limit", "-n"),
+    db_path: str = typer.Option("biolab.db", "--db"),
+):
+    """List recorded executions, newest first."""
+    from biolab import executions
+
+    conn = db.connect(db_path)
+    try:
+        rows = executions.list_executions(conn, tool, limit)
+    finally:
+        conn.close()
+    if not rows:
+        console.print("[yellow]No executions recorded[/yellow]")
+        return
+    table = Table(title="Executions")
+    for column in ("Execution", "Tool", "Version", "Status", "Agent", "Finished"):
+        table.add_column(column)
+    for row in rows:
+        table.add_row(
+            row["execution_id"][:8] + "...", row["tool"], row["tool_version"], row["status"],
+            row["agent_id"], row["finished_at"][:19].replace("T", " "),
+        )
+    console.print(table)
+
+
+@executions_app.command("show")
+def executions_show(
+    execution_id: str,
+    db_path: str = typer.Option("biolab.db", "--db"),
+):
+    """Show one execution record in full."""
+    from biolab import executions
+
+    conn = db.connect(db_path)
+    try:
+        record = executions.get_execution(conn, execution_id)
+    finally:
+        conn.close()
+    if record is None:
+        console.print(f"[red]No execution found for id: {execution_id}[/red]")
+        raise typer.Exit(1)
+    console.print_json(data=record)
+
+
+@executions_app.command("verify")
+def executions_verify(
+    db_path: str = typer.Option("biolab.db", "--db"),
+    artifacts: str = ARTIFACTS_OPTION,
+):
+    """Verify the execution chain and every output artifact; exit nonzero on corruption."""
+    from biolab import executions
+
+    conn = db.connect(db_path)
+    try:
+        ok, broken = executions.verify_executions(conn, _artifact_store(artifacts))
+        count = conn.execute("SELECT count(*) FROM executions").fetchone()[0]
+    finally:
+        conn.close()
+    if not ok:
+        console.print(f"[red]Execution {broken} failed verification (record or artifact)[/red]")
+        raise typer.Exit(1)
+    console.print(f"[green]Executions valid: {count} records[/green]")
+
+
+@executions_app.command("replay")
+def executions_replay(
+    execution_id: str,
+    db_path: str = typer.Option("biolab.db", "--db"),
+    artifacts: str = ARTIFACTS_OPTION,
+):
+    """Re-run a recorded execution and report whether its outputs reproduced."""
+    from biolab import executions, tools
+
+    conn = db.connect(db_path)
+    try:
+        result = executions.replay(
+            conn, _artifact_store(artifacts), tools.default_registry(), execution_id
+        )
+    finally:
+        conn.close()
+    console.print_json(data=result)
+    if not result["reproduced"]:
+        raise typer.Exit(1)
+
+
+@executions_app.command("artifact")
+def executions_artifact(
+    sha256: str,
+    out: Path = typer.Option(None, "--out", "-o", help="Write bytes to a file instead of stdout"),
+    artifacts: str = ARTIFACTS_OPTION,
+):
+    """Fetch a stored output artifact by sha256, verifying it on read."""
+    try:
+        data = _artifact_store(artifacts).get(sha256)
+    except (OSError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+    if out:
+        out.write_bytes(data)
+        console.print(f"[green]Wrote {len(data)} bytes to {out}[/green]")
+    else:
+        console.print(data.decode("utf-8", errors="replace"), markup=False)
+
+
+def main() -> None:
+    """Console entry point: user mistakes print one clean line instead of a traceback."""
+    try:
+        app()
+    except (ValueError, KeyError) as exc:
+        console.print(f"[red]Error: {exc}[/red]")
+        raise SystemExit(1) from exc
+
+
 if __name__ == "__main__":
-    app()
+    main()

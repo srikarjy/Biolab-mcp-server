@@ -173,3 +173,33 @@ def test_sequence_stats_tool_end_to_end_and_replays(env, tmp_path):
 
     with pytest.raises(ValueError):
         executions.execute(conn, store, registry, "sequence_stats", {"sequence": "ZZ!!"}, "a")
+
+
+def test_20_concurrent_executions_with_20_injected_faults_keep_one_valid_chain(tmp_path):
+    conn = db.connect(str(tmp_path / "t.db"))
+    store = ArtifactStore(tmp_path / "a")
+    registry = ToolRegistry()
+
+    def flaky(inputs: dict) -> dict[str, bytes]:
+        if inputs["n"] % 2:
+            raise RuntimeError("injected fault")
+        return {"o": str(inputs["n"]).encode()}
+
+    registry.register(ToolSpec("flaky", "1", flaky))
+    raised: list[int] = []
+    lock = threading.Lock()
+
+    def work(n: int) -> None:
+        try:
+            executions.execute(conn, store, registry, "flaky", {"n": n}, "a")
+        except RuntimeError:
+            with lock:
+                raised.append(n)
+
+    threads = [threading.Thread(target=work, args=(n,)) for n in range(40)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    rows = executions.list_executions(conn, limit=500)
+    assert len(raised) == 20 and len(rows) == 40  # every fault surfaced AND was recorded
+    assert sum(r["status"] == "failed" for r in rows) == 20
+    assert executions.verify_executions(conn, store) == (True, None)

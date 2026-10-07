@@ -43,3 +43,53 @@ def test_verify_and_export_preserve_auditable_payloads(tmp_path):
     assert result.exit_code == 1
     assert record.retrieval_id in result.output
     conn.close()
+
+
+def test_empty_queries_are_rejected_without_a_traceback(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    for args in (["search", " "], ["search-europepmc", ""], ["search-clinicaltrials", ""],
+                 ["search-biorxiv", ""]):
+        result = runner.invoke(app, [*args, "--db", db_path])
+        assert result.exit_code == 1 and "must not be empty" in result.output, args
+
+
+def test_evidence_with_only_invalid_sources_exits_nonzero(tmp_path):
+    result = runner.invoke(app, ["evidence", "q", "--sources", "bogus", "--db", str(tmp_path / "t.db")])
+    assert result.exit_code == 1
+
+
+def test_keys_create_rejects_blank_label_and_revoke_unknown_fails(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    assert runner.invoke(app, ["keys", "create", " ", "--db", db_path]).exit_code == 1
+    assert runner.invoke(app, ["keys", "revoke", "ghost", "--db", db_path]).exit_code == 1
+    assert runner.invoke(app, ["keys", "create", "alice", "--db", db_path]).exit_code == 0
+    assert runner.invoke(app, ["keys", "revoke", "alice", "--db", db_path]).exit_code == 0
+
+
+def test_web_refuses_open_public_bind_unless_explicit(tmp_path, monkeypatch):
+    monkeypatch.delenv("BIOLAB_ALLOW_ANONYMOUS", raising=False)
+    monkeypatch.delenv("BIOLAB_REQUIRE_AUTH", raising=False)
+    result = runner.invoke(app, ["web", "--host", "0.0.0.0", "--db", str(tmp_path / "t.db")])
+    assert result.exit_code == 1 and "Refusing to listen" in result.output
+
+
+def test_execution_commands_end_to_end_including_tamper(tmp_path, monkeypatch):
+    db_path, art = str(tmp_path / "t.db"), str(tmp_path / "art")
+    monkeypatch.setenv("BIOLAB_ARTIFACT_DIR", art)
+    ran = runner.invoke(app, ["run-tool", "sequence_stats", "-i", '{"sequence":"ATGC"}',
+                              "--db", db_path])
+    assert ran.exit_code == 0, ran.output
+    record = json.loads(ran.output)
+    sha = record["outputs"][0]["sha256"]
+    for args in (["executions", "list"], ["executions", "show", record["execution_id"]],
+                 ["executions", "verify"], ["executions", "replay", record["execution_id"]]):
+        result = runner.invoke(app, [*args, "--db", db_path])
+        assert result.exit_code == 0, (args, result.output)
+    assert runner.invoke(app, ["executions", "artifact", sha]).exit_code == 0
+    assert runner.invoke(app, ["executions", "artifact", "../x"]).exit_code == 1
+
+    (tmp_path / "art" / sha[:2] / sha).write_bytes(b"{}")
+    assert runner.invoke(app, ["executions", "verify", "--db", db_path]).exit_code == 1
+    assert runner.invoke(app, ["executions", "artifact", sha]).exit_code == 1
+    assert runner.invoke(app, ["run-tool", "sequence_stats", "-i", "[1]", "--db", db_path]).exit_code == 1
+    assert runner.invoke(app, ["run-tool", "sequence_stats", "-i", "bad", "--db", db_path]).exit_code == 1

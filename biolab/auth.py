@@ -6,7 +6,9 @@ higher-throughput budget, not to gate access outright.
 """
 
 import hashlib
+import os
 import secrets
+from collections.abc import Mapping
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from typing import Any
@@ -86,3 +88,26 @@ def bind_agent_id(requested: str, request: Any = None) -> str:
     if identity is not None and identity != "anonymous":
         return str(identity)
     return requested
+
+
+LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def check_exposure(host: str, env: Mapping[str, str] | None = None) -> None:
+    """Refuse to listen beyond loopback without auth unless anonymous access is explicit.
+
+    Anonymous callers can create projects, claims and watches and have retrievals
+    recorded under a self-declared identity. That is acceptable for a deliberately
+    public demo, never as an accident of a default.
+    """
+    env = os.environ if env is None else env
+    if host in LOOPBACK_HOSTS:
+        return
+    if env.get("BIOLAB_REQUIRE_AUTH", "").lower() in {"1", "true", "yes"}:
+        return
+    if env.get("BIOLAB_ALLOW_ANONYMOUS", "").lower() in {"1", "true", "yes"}:
+        return
+    raise SystemExit(
+        f"Refusing to listen on {host} without authentication. Set BIOLAB_REQUIRE_AUTH=true "
+        "(recommended) or BIOLAB_ALLOW_ANONYMOUS=true for a deliberately public instance."
+    )

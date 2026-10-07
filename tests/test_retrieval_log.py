@@ -347,3 +347,46 @@ def test_anchor_detects_a_rewritten_log_with_recomputed_hashes(tmp_path):
         retrieval_log.write_retrieval(conn, f"forged{i}", str(i), "a", "pubmed", {}, f"<f{i}/>", {})
     assert retrieval_log.verify_chain(conn) == (True, None)
     assert retrieval_log.verify_anchor(conn, anchor, key)[0] is False
+
+
+def test_20_concurrent_writers_with_20_injected_faults_lose_nothing(tmp_path):
+    """40 threads race through the background writer; every other one hits a DB-level reject.
+
+    Exactly the 20 good writes must land and return, exactly the 20 faulty ones must raise,
+    and the chain must stay valid with no orphan or missing rows.
+    """
+    path = str(tmp_path / "faults.db")
+    conn = db.connect(path)
+    conn.execute("""CREATE TRIGGER reject_bad BEFORE INSERT ON retrievals
+                    WHEN NEW.external_id LIKE 'bad-%'
+                    BEGIN SELECT RAISE(ABORT, 'injected fault'); END""")
+    conn.commit()
+    retrieval_log.start_writer(path)
+    good: dict[int, object] = {}
+    failures: list[int] = []
+    unexpected: list[Exception] = []
+    lock = threading.Lock()
+
+    def work(i: int) -> None:
+        ext = f"bad-{i}" if i % 2 else f"ok-{i}"
+        try:
+            record = retrieval_log.write_retrieval(conn, "q", ext, "a", "pubmed", {}, f"<{i}/>", {})
+            with lock:
+                good[i] = record
+        except Exception as exc:  # noqa: BLE001
+            with lock:
+                (failures if "injected fault" in str(exc) else unexpected).append(i)
+
+    try:
+        threads = [threading.Thread(target=work, args=(i,)) for i in range(40)]
+        [t.start() for t in threads]
+        [t.join() for t in threads]
+    finally:
+        retrieval_log.stop_writer()
+
+    assert unexpected == []
+    assert len(good) == 20 and len(failures) == 20
+    stored = {r[0] for r in conn.execute("SELECT retrieval_id FROM retrievals").fetchall()}
+    assert stored == {r.retrieval_id for r in good.values()}  # no lost, no orphaned rows
+    assert retrieval_log.verify_chain(conn) == (True, None)
+    conn.close()
