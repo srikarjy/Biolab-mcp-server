@@ -788,16 +788,28 @@ def _anchor_key() -> bytes:
 def anchor(
     out: Path = typer.Argument(..., help="File to write the signed chain-head checkpoint to"),
     db_path: str = typer.Option("biolab.db", "--db", help="Database to checkpoint"),
+    chain: str = typer.Option("retrievals", "--chain", help="retrievals or executions"),
 ):
     """Write a signed checkpoint of the chain head. Store it outside the database host."""
+    from biolab import executions
+
+    if chain not in ("retrievals", "executions"):
+        console.print("[red]--chain must be retrievals or executions[/red]")
+        raise typer.Exit(2)
     key = _anchor_key()
     conn = db.connect(db_path)
     try:
-        ok, broken_id = retrieval_log.verify_chain(conn)
+        if chain == "executions":
+            ok, broken_id = executions.verify_executions(conn)
+        else:
+            ok, broken_id = retrieval_log.verify_chain(conn)
         if not ok:
             console.print(f"[red]Refusing to anchor a broken chain (at {broken_id})[/red]")
             raise typer.Exit(1)
-        checkpoint = retrieval_log.make_anchor(conn, key)
+        if chain == "executions":
+            checkpoint = executions.make_anchor(conn, key)
+        else:
+            checkpoint = retrieval_log.make_anchor(conn, key)
     finally:
         conn.close()
     out.write_text(json.dumps(checkpoint, indent=2) + "\n")
@@ -810,12 +822,18 @@ def verify_anchor_cmd(
     db_path: str = typer.Option("biolab.db", "--db", help="Database to check"),
 ):
     """Check the chain, and that it still extends a previously saved checkpoint."""
+    from biolab import executions
+
     key = _anchor_key()
     checkpoint = json.loads(anchor_file.read_text())
     conn = db.connect(db_path)
     try:
-        chain_ok, broken_id = retrieval_log.verify_chain(conn)
-        anchor_ok, reason = retrieval_log.verify_anchor(conn, checkpoint, key)
+        if checkpoint.get("chain") == "executions":
+            chain_ok, broken_id = executions.verify_executions(conn)
+            anchor_ok, reason = executions.verify_anchor(conn, checkpoint, key)
+        else:
+            chain_ok, broken_id = retrieval_log.verify_chain(conn)
+            anchor_ok, reason = retrieval_log.verify_anchor(conn, checkpoint, key)
     finally:
         conn.close()
     if not chain_ok:

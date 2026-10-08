@@ -390,3 +390,23 @@ def test_20_concurrent_writers_with_20_injected_faults_lose_nothing(tmp_path):
     assert stored == {r.retrieval_id for r in good.values()}  # no lost, no orphaned rows
     assert retrieval_log.verify_chain(conn) == (True, None)
     conn.close()
+
+
+def test_hash_vectors_match_go_port():
+    """Pinned against go-biolab/internal/retrieval/chain_test.go; both must change together."""
+    args = {
+        "prev_hash": "abc", "retrieval_id": "id-1", "source": "pubmed", "external_id": "123",
+        "query_text": 'BRCA1 "mut" <ß> \u00e9\u4e2d 😀 \\ \n\t\x01\x7f',
+        "retrieved_at": "2026-01-01T00:00:00+00:00", "agent_id": "a&b",
+        "source_metadata": '{"k": "v"}', "raw_response": "<xml>é</xml>", "snapshot": '{"t":"😀"}',
+    }
+    assert retrieval_log.compute_hash(2, **args) == (
+        "90125ef4e394665706600b57ca70dd63192111b5da64520a44db33f1be027a24"
+    )
+    assert retrieval_log.compute_hash(1, **args) == (
+        "fc3f558ddde4376baba8f9774c9e2ec8b8b2f24ba39d7fcb0e7067b6f725d7cc"
+    )
+    anchor = {"version": 1, "count": 3, "head_hash": "hé", "created_at": "2026-01-01T00:00:00.000000+00:00"}
+    assert retrieval_log._anchor_mac(anchor, b"k") == (
+        "2ff6a1ddb1b3954331f77c63cfdf37bd666c01d8bc20c40ac2e79c617821db0c"
+    )

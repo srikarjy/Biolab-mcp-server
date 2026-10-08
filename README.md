@@ -368,6 +368,13 @@ CREATE TABLE retrievals (
 - **Hash-chained**, not just hashed: each row's hash covers the previous row's hash too, so deleting or editing any row — even in the database directly — breaks the chain for every row after it. Call `retrieval_log.verify_chain(conn)` to check the whole log; it returns exactly which row broke, if any.
 - Background write queue serializes all writes through one path, so the chain stays consistent even under concurrent agent calls
 
+## Tamper Evidence and Execution Runtime
+
+- Retrieval rows are hash-chained over every audited column (`hash_version` 2); legacy v1 rows still verify.
+- `biolab anchor out.json [--chain retrievals|executions]` writes an HMAC-signed checkpoint of a chain head (`BIOLAB_ANCHOR_KEY`). Keep it outside the database host; `biolab verify-anchor out.json` then detects tail truncation and full rewrites that the chain alone cannot see.
+- `biolab run-tool <tool> -i '{...}'` runs a registered tool (`sequence_stats`; `mmseqs2_search` when `mmseqs` is on PATH) and seals an immutable ExecutionRecord with content-addressed artifacts. `biolab executions {list,show,verify,replay,artifact}` inspects, verifies and replays them. If the record cannot be sealed, no result is returned.
+- The Go port (`go-biolab/`) writes the same v2 chain and has `verify`, `anchor` and `verify-anchor`; hashes are byte-compatible with Python and pinned by shared test vectors. The Go port does not implement the execution runtime.
+
 ## Architecture
 
 ```

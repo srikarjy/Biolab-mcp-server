@@ -93,3 +93,25 @@ def test_execution_commands_end_to_end_including_tamper(tmp_path, monkeypatch):
     assert runner.invoke(app, ["executions", "artifact", sha]).exit_code == 1
     assert runner.invoke(app, ["run-tool", "sequence_stats", "-i", "[1]", "--db", db_path]).exit_code == 1
     assert runner.invoke(app, ["run-tool", "sequence_stats", "-i", "bad", "--db", db_path]).exit_code == 1
+
+
+def test_execution_anchor_cli_detects_truncation(tmp_path, monkeypatch):
+    monkeypatch.setenv("BIOLAB_ARTIFACT_DIR", str(tmp_path / "art"))
+    monkeypatch.setenv("BIOLAB_ANCHOR_KEY", "k")
+    db_path = str(tmp_path / "t.db")
+    for seq in ("ATGC", "GGCC"):
+        r = runner.invoke(app, ["run-tool", "sequence_stats", "-i", f'{{"sequence":"{seq}"}}', "--db", db_path])
+        assert r.exit_code == 0, r.output
+    anchor_file = str(tmp_path / "exec.anchor")
+    assert runner.invoke(app, ["anchor", anchor_file, "--chain", "executions", "--db", db_path]).exit_code == 0
+    assert runner.invoke(app, ["verify-anchor", anchor_file, "--db", db_path]).exit_code == 0
+    assert runner.invoke(app, ["anchor", anchor_file, "--chain", "bogus", "--db", db_path]).exit_code == 2
+    import sqlite3
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("DELETE FROM executions WHERE rowid = (SELECT max(rowid) FROM executions)")
+    conn.commit()
+    conn.close()
+    assert runner.invoke(app, ["executions", "verify", "--db", db_path]).exit_code == 0
+    result = runner.invoke(app, ["verify-anchor", anchor_file, "--db", db_path])
+    assert result.exit_code == 1 and "truncated" in result.output

@@ -11,6 +11,8 @@ type RetrievalRecord struct {
 	RawResponse    string `db:"raw_response" json:"raw_response"`
 	Snapshot       string `db:"snapshot" json:"snapshot"`
 	ResponseHash   string `db:"response_hash" json:"response_hash"`
+	PrevHash       string `db:"prev_hash" json:"prev_hash"`
+	HashVersion    int    `db:"hash_version" json:"hash_version"`
 }
 
 type SourceMetadata struct {
@@ -19,85 +21,85 @@ type SourceMetadata struct {
 }
 
 type Snapshot struct {
-	Title             string          `json:"title"`
-	Abstract          string          `json:"abstract"`
-	Authors           []Author        `json:"authors"`
-	Journal           Journal         `json:"journal"`
-	PublicationTypes  []string        `json:"publication_types"`
-	MeshTerms         []string        `json:"mesh_terms"`
-	DOI               string          `json:"doi"`
-	MedlineStatus     string          `json:"medline_status"`
-	PubStatus         string          `json:"pub_status"`
+	Title            string   `json:"title"`
+	Abstract         string   `json:"abstract"`
+	Authors          []Author `json:"authors"`
+	Journal          Journal  `json:"journal"`
+	PublicationTypes []string `json:"publication_types"`
+	MeshTerms        []string `json:"mesh_terms"`
+	DOI              string   `json:"doi"`
+	MedlineStatus    string   `json:"medline_status"`
+	PubStatus        string   `json:"pub_status"`
 }
 
 type Author struct {
-	LastName  string `json:"lastname"`
-	ForeName  string `json:"forename"`
-	Initials  string `json:"initials"`
+	LastName string `json:"lastname"`
+	ForeName string `json:"forename"`
+	Initials string `json:"initials"`
 }
 
 type Journal struct {
-	Title            string `json:"title"`
-	ISOAbbreviation  string `json:"iso_abbreviation"`
-	ISSN             string `json:"issn"`
-	PubDate          string `json:"pub_date"`
+	Title           string `json:"title"`
+	ISOAbbreviation string `json:"iso_abbreviation"`
+	ISSN            string `json:"issn"`
+	PubDate         string `json:"pub_date"`
 }
 
 type PubMedPaper struct {
-	PMID              string
-	Title             string
-	Abstract          string
-	MedlineStatus     string
-	PubStatus         string
-	RawXML            string
-	Authors           []Author
-	Journal           Journal
-	PublicationTypes  []string
-	MeshTerms         []string
-	DOI               string
+	PMID             string
+	Title            string
+	Abstract         string
+	MedlineStatus    string
+	PubStatus        string
+	RawXML           string
+	Authors          []Author
+	Journal          Journal
+	PublicationTypes []string
+	MeshTerms        []string
+	DOI              string
 }
 
 type EuropePMCArticle struct {
-	ID              string
-	Source          string
-	PMID            string
-	DOI             string
-	Title           string
-	AuthorString    string
-	JournalTitle    string
-	JournalISOAbbr  string
-	ISSN            string
-	Volume          string
-	Issue           string
-	PageInfo        string
-	PubYear         string
-	PubType         string
-	IsOpenAccess    bool
-	AbstractText    string
-	Affiliation     string
-	FullTextXML     string
+	ID             string
+	Source         string
+	PMID           string
+	DOI            string
+	Title          string
+	AuthorString   string
+	JournalTitle   string
+	JournalISOAbbr string
+	ISSN           string
+	Volume         string
+	Issue          string
+	PageInfo       string
+	PubYear        string
+	PubType        string
+	IsOpenAccess   bool
+	AbstractText   string
+	Affiliation    string
+	FullTextXML    string
 }
 
 type ClinicalTrialStudy struct {
-	NCTId           string
-	BriefTitle      string
-	OfficialTitle   string
-	Organization    string
-	OverallStatus   string
-	StartDate       string
-	CompletionDate  string
-	StudyType       string
-	Phase           string
-	BriefSummary    string
-	DetailedDesc    string
-	Conditions      []string
-	Keywords        []string
-	Interventions   []Intervention
-	Design          Design
-	ArmGroups       []ArmGroup
-	Eligibility     Eligibility
-	Locations       []Location
-	FullJSON        string
+	NCTId          string
+	BriefTitle     string
+	OfficialTitle  string
+	Organization   string
+	OverallStatus  string
+	StartDate      string
+	CompletionDate string
+	StudyType      string
+	Phase          string
+	BriefSummary   string
+	DetailedDesc   string
+	Conditions     []string
+	Keywords       []string
+	Interventions  []Intervention
+	Design         Design
+	ArmGroups      []ArmGroup
+	Eligibility    Eligibility
+	Locations      []Location
+	FullJSON       string
 }
 
 type Intervention struct {
@@ -107,11 +109,11 @@ type Intervention struct {
 }
 
 type Design struct {
-	StudyType        string `json:"study_type"`
-	Allocation       string `json:"allocation"`
+	StudyType         string `json:"study_type"`
+	Allocation        string `json:"allocation"`
 	InterventionModel string `json:"intervention_model"`
-	PrimaryPurpose   string `json:"primary_purpose"`
-	Masking          string `json:"masking"`
+	PrimaryPurpose    string `json:"primary_purpose"`
+	Masking           string `json:"masking"`
 }
 
 type ArmGroup struct {
@@ -138,20 +140,20 @@ type Location struct {
 }
 
 type BioRxivPreprint struct {
-	Title                string
-	Authors              string
-	AuthorCorresponding  string
+	Title                   string
+	Authors                 string
+	AuthorCorresponding     string
 	AuthorCorrespondingInst string
-	DOI                  string
-	Date                 string
-	Version              string
-	Type                 string
-	License              string
-	Category             string
-	JATSXML              string
-	Abstract             string
-	Funder               string
-	Published            string
-	Server               string
-	FullJATSXML          string
+	DOI                     string
+	Date                    string
+	Version                 string
+	Type                    string
+	License                 string
+	Category                string
+	JATSXML                 string
+	Abstract                string
+	Funder                  string
+	Published               string
+	Server                  string
+	FullJATSXML             string
 }

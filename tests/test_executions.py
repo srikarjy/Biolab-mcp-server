@@ -1,6 +1,7 @@
 """ExecutionRecord: chain integrity, failure-closed behaviour, replay and artifact verification."""
 
 import json
+import shutil
 import sqlite3
 import threading
 
@@ -203,3 +204,77 @@ def test_20_concurrent_executions_with_20_injected_faults_keep_one_valid_chain(t
     assert len(raised) == 20 and len(rows) == 40  # every fault surfaced AND was recorded
     assert sum(r["status"] == "failed" for r in rows) == 20
     assert executions.verify_executions(conn, store) == (True, None)
+
+
+KEY = b"anchor-test-key"
+
+
+def _seed(env, n=3):
+    conn, store, registry = env
+    for i in range(n):
+        executions.execute(conn, store, registry, "reverse", {"text": f"abc{i}"}, "agent")
+    return conn
+
+
+def test_execution_anchor_detects_truncation(env):
+    conn = _seed(env)
+    anchor = executions.make_anchor(conn, KEY)
+    assert executions.verify_anchor(conn, anchor, KEY)[0]
+    conn.execute("DELETE FROM executions WHERE rowid = (SELECT max(rowid) FROM executions)")
+    conn.commit()
+    assert executions.verify_executions(conn)[0]  # chain alone cannot see tail truncation
+    ok, reason = executions.verify_anchor(conn, anchor, KEY)
+    assert not ok and "truncated" in reason
+
+
+def test_execution_anchor_detects_rewrite_and_forgery(env):
+    conn = _seed(env)
+    anchor = executions.make_anchor(conn, KEY)
+    # Attacker rewrites record 2 and recomputes every hash after it.
+    rows = conn.execute(f"SELECT {', '.join(executions._COLUMNS)} FROM executions ORDER BY rowid").fetchall()
+    prev = rows[0][executions._COLUMNS.index("record_hash")]
+    for values in rows[1:]:
+        row = dict(zip(executions._COLUMNS, values, strict=True))
+        row["agent_id"] = "mallory"
+        row["prev_hash"] = prev
+        row["record_hash"] = executions._record_hash(executions.HASH_VERSION, row)
+        conn.execute(
+            "UPDATE executions SET agent_id=?, prev_hash=?, record_hash=? WHERE execution_id=?",
+            (row["agent_id"], row["prev_hash"], row["record_hash"], row["execution_id"]),
+        )
+        prev = row["record_hash"]
+    conn.commit()
+    assert executions.verify_executions(conn)[0]
+    ok, reason = executions.verify_anchor(conn, anchor, KEY)
+    assert not ok and "rewritten" in reason
+    forged = dict(anchor, head_hash="0" * 64)
+    assert "signature" in executions.verify_anchor(conn, forged, KEY)[1]
+    assert not executions.verify_anchor(conn, anchor, b"wrong-key")[0]
+
+
+def test_retrieval_anchor_is_not_accepted_as_execution_anchor(env):
+    from biolab import retrieval_log
+
+    conn = _seed(env)
+    assert not executions.verify_anchor(conn, retrieval_log.make_anchor(conn, KEY), KEY)[0]
+
+
+@pytest.mark.skipif(shutil.which("mmseqs") is None, reason="mmseqs not installed")
+def test_mmseqs2_search_runs_records_and_replays(tmp_path):
+    from biolab import tools
+
+    conn = db.connect(str(tmp_path / "m.db"))
+    store = ArtifactStore(tmp_path / "artifacts")
+    registry = tools.default_registry()
+    protein = "MKTAYIAKQRQISFVKSHFSRQLEERLGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALPDAQFEVV"
+    inputs = {
+        "query_fasta": f">q1\n{protein}\n",
+        "target_fasta": f">t1\n{protein}\n>t2\n{protein[::-1]}\n",
+    }
+    record = executions.execute(conn, store, registry, "mmseqs2_search", inputs, "agent")
+    assert record["status"] == "succeeded"
+    hits = store.get(record["outputs"][0]["sha256"]).decode()
+    assert "q1\tt1" in hits
+    assert executions.verify_executions(conn, store)[0]
+    result = executions.replay(conn, store, registry, record["execution_id"])
+    assert result["reproduced"], result

@@ -10,6 +10,7 @@ Design rules
 """
 
 import hashlib
+import hmac
 import json
 import threading
 import uuid
@@ -241,3 +242,53 @@ def replay(
         "replay_error": replay_error,
         "diff": diff,
     }
+
+
+def _anchor_mac(anchor: dict, key: bytes) -> str:
+    body = canonical_json(
+        ["biolab-execution-anchor", anchor["version"], anchor["count"], anchor["head_hash"],
+         anchor["created_at"]]
+    )
+    return hmac.new(key, body.encode("utf-8"), hashlib.sha256).hexdigest()
+
+
+def make_anchor(conn: Any, key: bytes) -> dict:
+    """Signed checkpoint of the execution chain head, stored outside the database.
+
+    Same purpose as retrieval_log.make_anchor: verify_executions cannot see tail
+    truncation or a rewrite that recomputes every hash.
+    """
+    count = conn.execute("SELECT count(*) FROM executions").fetchone()[0]
+    head = conn.execute("SELECT record_hash FROM executions ORDER BY rowid DESC LIMIT 1").fetchone()
+    anchor = {
+        "chain": "executions",
+        "version": 1,
+        "count": count,
+        "head_hash": head[0] if head else "",
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    anchor["hmac"] = _anchor_mac(anchor, key)
+    return anchor
+
+
+def verify_anchor(conn: Any, anchor: dict, key: bytes) -> tuple[bool, str]:
+    """Check the live execution chain against a checkpoint. Returns (ok, reason)."""
+    try:
+        is_executions = anchor["chain"] == "executions"
+        expected = _anchor_mac(anchor, key)
+    except (KeyError, TypeError):
+        return False, "malformed anchor"
+    if not is_executions or not hmac.compare_digest(expected, str(anchor.get("hmac", ""))):
+        return False, "anchor signature invalid (wrong key, edited anchor, or not an executions anchor)"
+    count = anchor["count"]
+    if count == 0:
+        return True, "anchor predates any records"
+    rows = conn.execute(
+        "SELECT record_hash FROM executions ORDER BY rowid ASC LIMIT 1 OFFSET ?", (count - 1,)
+    ).fetchall()
+    if not rows:
+        total = conn.execute("SELECT count(*) FROM executions").fetchone()[0]
+        return False, f"log truncated: anchor covers {count} executions, log has {total}"
+    if rows[0][0] != anchor["head_hash"]:
+        return False, f"execution {count} no longer matches the anchored hash (log rewritten)"
+    return True, f"executions extend the anchored head at record {count}"

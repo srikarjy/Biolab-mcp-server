@@ -18,8 +18,8 @@ import (
 )
 
 var (
-	dbPath   string
-	agentID  string
+	dbPath     string
+	agentID    string
 	maxResults int
 )
 
@@ -118,6 +118,30 @@ func main() {
 	demoCmd.Flags().String("query", "BRCA1 pancreatic cancer", "Demo query")
 	demoCmd.Flags().String("agent", "demo:user", "Agent ID for demo")
 	rootCmd.AddCommand(demoCmd)
+
+	verifyCmd := &cobra.Command{
+		Use:   "verify",
+		Short: "Verify the retrieval hash chain",
+		Args:  cobra.NoArgs,
+		RunE:  runVerify,
+	}
+	rootCmd.AddCommand(verifyCmd)
+
+	anchorCmd := &cobra.Command{
+		Use:   "anchor [out.json]",
+		Short: "Write a signed chain-head checkpoint (needs BIOLAB_ANCHOR_KEY)",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runAnchor,
+	}
+	rootCmd.AddCommand(anchorCmd)
+
+	verifyAnchorCmd := &cobra.Command{
+		Use:   "verify-anchor [anchor.json]",
+		Short: "Check the chain and that it still extends a saved checkpoint",
+		Args:  cobra.ExactArgs(1),
+		RunE:  runVerifyAnchor,
+	}
+	rootCmd.AddCommand(verifyAnchorCmd)
 
 	if err := rootCmd.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -572,4 +596,98 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+func anchorKey() ([]byte, error) {
+	key := os.Getenv("BIOLAB_ANCHOR_KEY")
+	if key == "" {
+		return nil, fmt.Errorf("set BIOLAB_ANCHOR_KEY to sign and check anchors")
+	}
+	return []byte(key), nil
+}
+
+func runVerify(cmd *cobra.Command, args []string) error {
+	database, err := getDB()
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	ok, brokenID, err := retrieval.VerifyChain(database)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("chain broken at %s", brokenID)
+	}
+	var count int
+	if err := database.Get(&count, "SELECT count(*) FROM retrievals"); err != nil {
+		return err
+	}
+	fmt.Printf("Chain valid: %d records\n", count)
+	return nil
+}
+
+func runAnchor(cmd *cobra.Command, args []string) error {
+	key, err := anchorKey()
+	if err != nil {
+		return err
+	}
+	database, err := getDB()
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	ok, brokenID, err := retrieval.VerifyChain(database)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("refusing to anchor a broken chain (at %s)", brokenID)
+	}
+	a, err := retrieval.MakeAnchor(database, key)
+	if err != nil {
+		return err
+	}
+	out, _ := json.MarshalIndent(a, "", "  ")
+	if err := os.WriteFile(args[0], append(out, '\n'), 0o644); err != nil {
+		return err
+	}
+	fmt.Printf("Anchored %d records -> %s\n", a.Count, args[0])
+	return nil
+}
+
+func runVerifyAnchor(cmd *cobra.Command, args []string) error {
+	key, err := anchorKey()
+	if err != nil {
+		return err
+	}
+	raw, err := os.ReadFile(args[0])
+	if err != nil {
+		return err
+	}
+	var a retrieval.Anchor
+	if err := json.Unmarshal(raw, &a); err != nil {
+		return fmt.Errorf("malformed anchor: %w", err)
+	}
+	database, err := getDB()
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	chainOK, brokenID, err := retrieval.VerifyChain(database)
+	if err != nil {
+		return err
+	}
+	anchorOK, reason, err := retrieval.VerifyAnchor(database, a, key)
+	if err != nil {
+		return err
+	}
+	if !chainOK {
+		return fmt.Errorf("chain broken at %s", brokenID)
+	}
+	if !anchorOK {
+		return fmt.Errorf("anchor check failed: %s", reason)
+	}
+	fmt.Printf("OK: %s\n", reason)
+	return nil
 }
