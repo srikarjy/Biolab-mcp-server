@@ -18,7 +18,9 @@ CREATE TABLE IF NOT EXISTS retrievals (
     source_metadata  TEXT NOT NULL,
     raw_response     TEXT NOT NULL,
     snapshot         TEXT NOT NULL,
-    response_hash    TEXT NOT NULL
+    response_hash    TEXT NOT NULL,
+    prev_hash        TEXT NOT NULL DEFAULT '',
+    hash_version     INTEGER NOT NULL DEFAULT 2
 );
 
 CREATE INDEX IF NOT EXISTS idx_retrievals_external_id ON retrievals(external_id);
@@ -33,6 +35,9 @@ func Connect(dbPath string) (*sqlx.DB, error) {
 		return nil, fmt.Errorf("connect: %w", err)
 	}
 
+	if err := upgradeRetrievals(db); err != nil {
+		return nil, fmt.Errorf("upgrade: %w", err)
+	}
 	if _, err := db.Exec(Schema); err != nil {
 		return nil, fmt.Errorf("schema: %w", err)
 	}
@@ -43,6 +48,34 @@ func Connect(dbPath string) (*sqlx.DB, error) {
 	}
 
 	return db, nil
+}
+
+// upgradeRetrievals adds the chain columns to a database created before hash chaining.
+// Legacy rows are labelled hash_version 1; they hashed only raw_response and carry no
+// prev_hash, so they are not part of a verifiable chain.
+func upgradeRetrievals(db *sqlx.DB) error {
+	var cols []string
+	if err := db.Select(&cols, "SELECT name FROM pragma_table_info('retrievals')"); err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		return nil // fresh database; Schema creates the full table
+	}
+	have := map[string]bool{}
+	for _, c := range cols {
+		have[c] = true
+	}
+	if !have["prev_hash"] {
+		if _, err := db.Exec("ALTER TABLE retrievals ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	if !have["hash_version"] {
+		if _, err := db.Exec("ALTER TABLE retrievals ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 1"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func MustConnect(dbPath string) *sqlx.DB {

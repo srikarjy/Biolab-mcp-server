@@ -2,9 +2,7 @@ package retrieval
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"sync"
 	"time"
@@ -14,8 +12,8 @@ import (
 )
 
 type WriteRequest struct {
-	Record    models.RetrievalRecord
-	Response  chan error
+	Record   models.RetrievalRecord
+	Response chan error
 }
 
 type Log struct {
@@ -52,15 +50,49 @@ func (l *Log) writerLoop() {
 	}
 }
 
-func (l *Log) writeSync(record models.RetrievalRecord) error {
-	_, err := l.db.Exec(`
+// writeSync chains and inserts one record. BEGIN IMMEDIATE takes the write lock before
+// the head is read, so no other writer (goroutine or process) can interleave between
+// reading the previous hash and inserting the next row.
+func (l *Log) writeSync(record models.RetrievalRecord) (err error) {
+	ctx := context.Background()
+	conn, err := l.db.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	if _, err = conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_, _ = conn.ExecContext(ctx, "ROLLBACK")
+		}
+	}()
+
+	var head string
+	row := conn.QueryRowContext(ctx, "SELECT response_hash FROM retrievals ORDER BY rowid DESC LIMIT 1")
+	if scanErr := row.Scan(&head); scanErr != nil && scanErr != sql.ErrNoRows {
+		return scanErr
+	}
+	record.PrevHash = head
+	record.HashVersion = HashVersion
+	record.ResponseHash, err = ComputeHash(record)
+	if err != nil {
+		return err
+	}
+	if _, err = conn.ExecContext(ctx, `
 		INSERT INTO retrievals
 			(retrieval_id, source, external_id, query_text, retrieved_at,
-			 agent_id, source_metadata, raw_response, snapshot, response_hash)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 agent_id, source_metadata, raw_response, snapshot, response_hash,
+			 prev_hash, hash_version)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, record.RetrievalID, record.Source, record.ExternalID, record.QueryText,
 		record.RetrievedAt, record.AgentID, record.SourceMetadata,
-		record.RawResponse, record.Snapshot, record.ResponseHash)
+		record.RawResponse, record.Snapshot, record.ResponseHash,
+		record.PrevHash, record.HashVersion); err != nil {
+		return err
+	}
+	_, err = conn.ExecContext(ctx, "COMMIT")
 	return err
 }
 
@@ -83,7 +115,7 @@ func (l *Log) Get(ctx context.Context, retrievalID string) (*models.RetrievalRec
 	var record models.RetrievalRecord
 	err := l.db.GetContext(ctx, &record, `
 		SELECT retrieval_id, source, external_id, query_text, retrieved_at,
-			   agent_id, source_metadata, raw_response, snapshot, response_hash
+			   agent_id, source_metadata, raw_response, snapshot, response_hash, prev_hash, hash_version
 		FROM retrievals WHERE retrieval_id = ?
 	`, retrievalID)
 	if err == sql.ErrNoRows {
@@ -95,7 +127,7 @@ func (l *Log) Get(ctx context.Context, retrievalID string) (*models.RetrievalRec
 func (l *Log) List(ctx context.Context, agentID, source string, limit int) ([]models.RetrievalRecord, error) {
 	var records []models.RetrievalRecord
 	query := `SELECT retrieval_id, source, external_id, query_text, retrieved_at,
-		agent_id, source_metadata, raw_response, snapshot, response_hash
+		agent_id, source_metadata, raw_response, snapshot, response_hash, prev_hash, hash_version
 		FROM retrievals WHERE 1=1`
 	args := []interface{}{}
 	if agentID != "" {
@@ -128,7 +160,6 @@ func BuildRecord(
 	retrievedAt := time.Now().UTC().Format(time.RFC3339)
 	sourceMetaJSON, _ := json.Marshal(sourceMetadata)
 	snapshotJSON, _ := json.Marshal(snapshot)
-	hash := sha256.Sum256([]byte(rawResponse))
 
 	return models.RetrievalRecord{
 		RetrievalID:    retrievalID,
@@ -140,7 +171,7 @@ func BuildRecord(
 		SourceMetadata: string(sourceMetaJSON),
 		RawResponse:    rawResponse,
 		Snapshot:       string(snapshotJSON),
-		ResponseHash:   hex.EncodeToString(hash[:]),
+		HashVersion:    HashVersion,
 	}
 }
 

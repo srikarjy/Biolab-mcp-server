@@ -8,3 +8,8 @@ build/
 *.egg-info/
 .env
 .DS_Store
+
+# build artifacts and demo output
+go-biolab/bin/
+export_*.jsonl
+biolab_artifacts/

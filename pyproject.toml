@@ -44,7 +44,7 @@ turso = [
 ]
 
 [project.entry-points]
-console_scripts = { biolab = "biolab.cli:app" }
+console_scripts = { biolab = "biolab.cli:main" }
 
 [project.urls]
 Homepage = "https://github.com/srikarjy/biolab-mcp-server"

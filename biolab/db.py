@@ -20,13 +20,35 @@ CREATE TABLE IF NOT EXISTS retrievals (
     raw_response     TEXT NOT NULL,
     snapshot         TEXT NOT NULL,
     response_hash    TEXT NOT NULL,
-    prev_hash        TEXT NOT NULL DEFAULT ''
+    prev_hash        TEXT NOT NULL DEFAULT '',
+    hash_version     INTEGER NOT NULL DEFAULT 2
 );
 
 CREATE INDEX IF NOT EXISTS idx_retrievals_external_id ON retrievals(external_id);
 CREATE INDEX IF NOT EXISTS idx_retrievals_agent_id ON retrievals(agent_id);
 CREATE INDEX IF NOT EXISTS idx_retrievals_retrieved_at ON retrievals(retrieved_at);
 CREATE INDEX IF NOT EXISTS idx_retrievals_source ON retrievals(source);
+
+CREATE TABLE IF NOT EXISTS executions (
+    execution_id    TEXT PRIMARY KEY,
+    tool            TEXT NOT NULL,
+    tool_version    TEXT NOT NULL,
+    agent_id        TEXT NOT NULL,
+    status          TEXT NOT NULL,           -- succeeded | failed
+    inputs          TEXT NOT NULL,           -- canonical JSON
+    input_hash      TEXT NOT NULL,
+    container       TEXT NOT NULL DEFAULT '',  -- image digest or "host"
+    device          TEXT NOT NULL DEFAULT '',  -- e.g. cpu, cuda:0
+    retrieval_ids   TEXT NOT NULL DEFAULT '[]',  -- evidence this run was fed from
+    outputs         TEXT NOT NULL DEFAULT '[]',  -- [{name, sha256, size}]
+    error           TEXT NOT NULL DEFAULT '',
+    started_at      TEXT NOT NULL,
+    finished_at     TEXT NOT NULL,
+    prev_hash       TEXT NOT NULL,
+    record_hash     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_executions_tool ON executions(tool);
+CREATE INDEX IF NOT EXISTS idx_executions_agent ON executions(agent_id);
 
 CREATE TABLE IF NOT EXISTS api_keys (
     key_hash    TEXT PRIMARY KEY,  -- SHA-256 of the raw key; the raw key is never stored
@@ -149,12 +171,26 @@ def open_connection(target: str, token: str | None = None) -> Any:
     return sqlite3.connect(target, check_same_thread=False)
 
 
+def _upgrade_retrievals(conn: Any) -> None:
+    """Bring a pre-0.5 retrievals table up to date.
+
+    Rows written before hash_version existed were hashed over raw_response only, so
+    they are stamped version 1 and verified under that legacy rule; new rows get 2.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(retrievals)").fetchall()}
+    if "prev_hash" not in columns:
+        conn.execute("ALTER TABLE retrievals ADD COLUMN prev_hash TEXT NOT NULL DEFAULT ''")
+    if "hash_version" not in columns:
+        conn.execute("ALTER TABLE retrievals ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 1")
+
+
 def connect(db_path: str) -> Any:
     global _current_target
     target, token = resolve_target(db_path)
 
     conn = open_connection(target, token)
     conn.executescript(SCHEMA_V2)
+    _upgrade_retrievals(conn)
     conn.commit()
     _current_target = target
     return conn

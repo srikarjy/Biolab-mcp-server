@@ -237,13 +237,7 @@ async def search(request: Request) -> JSONResponse:
         payload = await request.json()
         if not isinstance(payload, dict):
             return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
-        authenticated_identity = auth.current_identity.get()
-        requested_agent_id = str(payload.get("agent_id", "api:user"))
-        agent_id = (
-            authenticated_identity
-            if authenticated_identity not in {None, "anonymous"}
-            else requested_agent_id
-        )
+        agent_id = auth.bind_agent_id(str(payload.get("agent_id", "api:user")), request)
         result = evidence.search_evidence(
             request.app.state.conn,
             query=str(payload.get("query", "")),
@@ -350,13 +344,7 @@ async def watches(request: Request) -> JSONResponse:
         })
     try:
         payload = await request.json()
-        authenticated_identity = auth.current_identity.get()
-        requested_agent_id = str(payload.get("agent_id", "api:watch"))
-        agent_id = (
-            authenticated_identity
-            if authenticated_identity not in {None, "anonymous"}
-            else requested_agent_id
-        )
+        agent_id = auth.bind_agent_id(str(payload.get("agent_id", "api:watch")), request)
         watch = workspace.create_watch(
             request.app.state.conn,
             str(payload.get("project_id", "")),
@@ -455,6 +443,7 @@ class RestApiKeyAuthMiddleware:
             await response(scope, receive, send)
             return
 
+        scope["biolab_identity"] = identity
         token = auth.current_identity.set(identity)
         try:
             await self.app(scope, receive, send)
