@@ -11,6 +11,16 @@
 
 A **local-first scientific evidence workspace** with Python and Go clients. It sits between scientists or AI agents and PubMed, Europe PMC, ClinicalTrials.gov, UniProt, Open Targets, and bioRxiv/medRxiv. Every retrieval preserves its source response and returns a `retrieval_id`; projects, reviewed collections, evidence watches, and claim links build a traceable workflow on top.
 
+## Project Guide
+
+- [Onboarding guide](ONBOARDING.md) — architecture, request lifecycle, entry points, and conventions.
+- [TODO and verification baseline](TODO.md) — prioritized backlog with confirmed test and quality results.
+- [End-to-end user guide](docs/END_TO_END_USER_GUIDE.md) — how a person or agent connects, searches, reviews, monitors, reports, and verifies.
+- [A2A integration](docs/A2A.md) — how another agent discovers and calls Biolab through Agent2Agent.
+- [Vercel deployment](docs/VERCEL_DEPLOYMENT.md) — the non-Hugging-Face deployment path.
+- [Complex problem log](docs/COMPLEX_PROBLEM_LOG.md) — durable notes for non-trivial engineering investigations and their evidence.
+- [Project instructions](CLAUDE.md) — concise implementation and testing rules for contributors and coding agents.
+
 **New to MCP?** It's an open standard that lets an AI assistant — Codex,
 ChatGPT, Claude, Cursor, and others — call external tools during a conversation.
 Add Biolab and the assistant can retrieve, preserve, organize, monitor, and cite
@@ -18,11 +28,11 @@ scientific evidence while keeping every result inspectable later.
 
 ## Use It Now — No Install
 
-A hosted instance is available at `https://srikarjy025-biolab-mcp.hf.space/mcp`. Point your client at it and you're done. Hosted capabilities follow the version currently deployed there; run locally for the complete 0.4 workspace in this repository.
+A unified hosted instance is available at `https://biolab-a2a.vercel.app/`. The same Vercel deployment serves the dashboard, MCP, REST, health, OpenAPI, and A2A from one domain.
 
 **Claude Code:**
 ```bash
-claude mcp add --transport http biolab https://srikarjy025-biolab-mcp.hf.space/mcp
+claude mcp add --transport http biolab https://biolab-a2a.vercel.app/mcp
 ```
 
 **Claude Desktop / Cursor** — add this to your MCP config file:
@@ -30,7 +40,7 @@ claude mcp add --transport http biolab https://srikarjy025-biolab-mcp.hf.space/m
 {
   "mcpServers": {
     "biolab": {
-      "url": "https://srikarjy025-biolab-mcp.hf.space/mcp"
+      "url": "https://biolab-a2a.vercel.app/mcp"
     }
   }
 }
@@ -402,7 +412,7 @@ integrations/
 plugins/biolab/                # Portable Codex/ChatGPT Agent Plugin bundle
 deploy/gateway/                # Caddy + Docker Compose deployment template
 
-space/                      # Files pushed to the hosted Hugging Face Space
+space/                      # Container files for self-hosted deployment
 ├── Dockerfile                # Python-server-specific image (see repo-root Dockerfile for the Go one)
 └── README.md                  # Space config (title, hosting metadata)
 ```
@@ -433,7 +443,7 @@ go build -o biolab-server ./cmd/server
 
 | Target | Method |
 |--------|--------|
-| **Hosted (no install)** | https://srikarjy025-biolab-mcp.hf.space/mcp — capabilities depend on the deployed Space version |
+| **Hosted (no install)** | https://biolab-a2a.vercel.app/ — MCP, REST, dashboard, and A2A on one domain |
 | **Local** | `pipx install biolab-mcp` or download binary |
 | **CI/CD** | GitHub Actions → PyPI (Trusted Publishing/OIDC) + GHCR + GitHub Releases |
 | **Containers** | `docker pull ghcr.io/srikarjy/biolab-mcp:latest`, or build `space/Dockerfile` yourself |

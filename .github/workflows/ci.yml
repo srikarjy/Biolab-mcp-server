@@ -61,7 +61,7 @@ jobs:
           pip install -e .
 
       - name: Run tests
-        run: pytest tests/ -v --tb=short -m "not benchmark"
+        run: pytest tests/ -v --tb=short -m "not live and not benchmark"
 
   lint:
     name: Lint

@@ -1,0 +1,47 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "installCommand": "pip install \".[turso]\"",
+  "functions": {
+    "api/index.py": {
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/",
+      "destination": "/api"
+    },
+    {
+      "source": "/mcp",
+      "destination": "/api/mcp"
+    },
+    {
+      "source": "/a2a",
+      "destination": "/api/a2a"
+    },
+    {
+      "source": "/.well-known/agent-card.json",
+      "destination": "/api/.well-known/agent-card.json"
+    },
+    {
+      "source": "/health",
+      "destination": "/api/health"
+    },
+    {
+      "source": "/openapi.json",
+      "destination": "/api/openapi.json"
+    },
+    {
+      "source": "/metrics",
+      "destination": "/api/metrics"
+    },
+    {
+      "source": "/v1/:path*",
+      "destination": "/api/v1/:path*"
+    },
+    {
+      "source": "/api/:path*",
+      "destination": "/api"
+    }
+  ]
+}

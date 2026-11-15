@@ -13,13 +13,13 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
-from biolab import auth, db, evidence, retrieval_log, workspace
+from biolab import a2a, auth, db, evidence, retrieval_log, workspace
 
 OPENAPI_SCHEMA = {
     "openapi": "3.1.0",
     "info": {
         "title": "Biolab Evidence API",
-        "version": "0.4.0",
+        "version": "0.4.1",
         "description": "Auditable scientific retrieval, projects, monitoring, and claim provenance.",
     },
     "paths": {
@@ -51,6 +51,8 @@ OPENAPI_SCHEMA = {
         "/v1/claims": {"post": {"summary": "Create a scientific claim"}},
         "/v1/claims/{claim_id}/evidence": {"post": {"summary": "Link evidence to a claim"}},
         "/v1/claims/{claim_id}": {"get": {"summary": "Trace a claim to evidence"}},
+        "/.well-known/agent-card.json": {"get": {"summary": "A2A Agent Card"}},
+        "/a2a": {"post": {"summary": "A2A JSON-RPC endpoint"}},
     },
 }
 
@@ -61,100 +63,228 @@ DASHBOARD_HTML = r"""<!doctype html>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Biolab Evidence Workspace</title>
   <style>
-    :root { color-scheme: light dark; font-family: system-ui, sans-serif; }
-    body { max-width: 980px; margin: 3rem auto; padding: 0 1rem; }
-    form { display: grid; gap: .8rem; padding: 1rem; border: 1px solid #8885; border-radius: 12px; }
-    input, button { padding: .75rem; font: inherit; }
-    button { cursor: pointer; font-weight: 650; }
-    .panel, .card { padding: 1rem; border: 1px solid #8885; border-radius: 12px; }
-    .cards { display: grid; gap: .8rem; margin-top: 1rem; }
-    .card h3 { margin: 0 0 .4rem; }
-    .badge { display: inline-block; padding: .15rem .45rem; border-radius: 999px;
-             background: #2980b933; font-size: .8rem; }
+    :root { --ink: #10212b; --muted: #61747d; --line: #d9e4e5; --paper: #f7faf8;
+      --card: #fff; --teal: #087f78; --teal-dark: #075e5a; --lime: #d8f36a;
+      color: var(--ink); background: var(--paper); font-family: Inter, ui-sans-serif, system-ui, -apple-system, sans-serif; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 90% 0%, #dff7e7 0, transparent 30rem), var(--paper); }
+    .shell { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 28px 0 64px; }
+    .topbar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 70px; }
+    .brand { display: flex; align-items: center; gap: .7rem; font-weight: 800; letter-spacing: -.02em; }
+    .mark { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 11px; color: #fff; background: var(--teal); font-size: .9rem; }
+    .toplink { color: var(--muted); font-size: .85rem; }
+    .eyebrow { margin: 0 0 12px; color: var(--teal); font-size: .74rem; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+    h1 { max-width: 760px; margin: 0; font-size: clamp(2.6rem, 6vw, 5.3rem); line-height: .98; letter-spacing: -.065em; }
+    .lede { max-width: 660px; margin: 22px 0 0; color: var(--muted); font-size: 1.08rem; line-height: 1.65; }
+    .signals { display: flex; flex-wrap: wrap; gap: .55rem; margin: 24px 0 42px; }
+    .signal { display: inline-flex; align-items: center; gap: .45rem; padding: .48rem .72rem; border: 1px solid var(--line); border-radius: 999px; background: #ffffffb8; color: #36515a; font-size: .78rem; font-weight: 700; }
+    .dot { width: 7px; height: 7px; border-radius: 50%; background: #1aaf75; }
+    .workspace { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(280px, .65fr); gap: 18px; align-items: start; }
+    .panel { border: 1px solid var(--line); border-radius: 22px; background: var(--card); box-shadow: 0 18px 50px #174d3d0d; }
+    .main-panel { padding: clamp(20px, 4vw, 36px); }
+    .side-panel { padding: 22px; }
+    .panel-head { display: flex; align-items: start; justify-content: space-between; gap: 1rem; margin-bottom: 22px; }
+    h2 { margin: 0; font-size: 1.18rem; letter-spacing: -.025em; }
+    h3 { margin: 0 0 .55rem; font-size: 1rem; letter-spacing: -.01em; }
+    .kicker { margin: 6px 0 0; color: var(--muted); font-size: .83rem; line-height: 1.45; }
+    form { display: grid; gap: 16px; }
+    label { display: grid; gap: 8px; color: #38525b; font-size: .78rem; font-weight: 800; letter-spacing: .01em; }
+    input, button { min-height: 46px; padding: .75rem .9rem; border: 1px solid var(--line); border-radius: 12px; font: inherit; }
+    input { width: 100%; color: var(--ink); background: #fbfdfc; outline: none; }
+    input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px #087f7820; }
+    button { cursor: pointer; color: #fff; background: var(--teal); border-color: var(--teal); font-weight: 800; transition: transform .15s ease, background .15s ease; }
+    button:hover { transform: translateY(-1px); background: var(--teal-dark); }
+    button.secondary { color: var(--teal-dark); background: #edf8f0; border-color: #cde9d6; }
+    button:disabled { cursor: wait; opacity: .65; transform: none; }
+    .row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .search-button { width: 100%; margin-top: 3px; }
+    .note { margin: 18px 0 0; padding: 12px 14px; border-left: 3px solid var(--lime); color: #536970; background: #f7faee; font-size: .78rem; line-height: 1.5; }
+    .stack { display: grid; gap: 18px; }
+    .status { display: flex; align-items: center; gap: 10px; padding: 13px 14px; border-radius: 14px; background: #f1faf3; color: #236a48; font-size: .83rem; line-height: 1.35; }
+    .status.bad { background: #fff2ef; color: #9b4539; }
+    .mini-form { gap: 10px; }
+    .project-list { display: grid; gap: 9px; margin: 16px 0 0; padding: 0; list-style: none; }
+    .project-item { width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 12px; color: var(--ink); background: #fbfdfc; text-align: left; }
+    button.project-item { min-height: 0; color: var(--ink); background: #fbfdfc; border-color: var(--line); font-size: .84rem; }
+    button.project-item:hover { color: var(--teal-dark); background: #f1faf3; border-color: #b9ddc6; }
+    .project-item code { display: block; margin-top: 4px; color: var(--muted); font-size: .68rem; }
+    .project-detail { margin-top: 12px; padding: 12px; border-radius: 12px; color: #536970; background: #f7faf8; font-size: .76rem; line-height: 1.5; }
+    .project-detail strong { color: var(--ink); }
+    .project-detail a { color: var(--teal-dark); font-weight: 800; }
+    .results-section { margin-top: 44px; }
+    .results-head { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: 16px; }
+    .summary { margin: 5px 0 0; color: var(--muted); font-size: .83rem; }
+    .cards { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .evidence-card { padding: 19px; border: 1px solid var(--line); border-radius: 17px; background: #fff; }
+    .card-meta { display: flex; align-items: center; justify-content: space-between; gap: 1rem; margin-bottom: 15px; }
+    .badge { display: inline-block; padding: .3rem .52rem; border-radius: 999px; color: var(--teal-dark); background: #dff4e6; font-size: .68rem; font-weight: 850; letter-spacing: .04em; text-transform: uppercase; }
+    .record-id { color: var(--muted); font-size: .69rem; }
+    .evidence-card p { margin: 0 0 12px; color: #5b7077; font-size: .8rem; line-height: 1.5; }
+    .evidence-card a { color: var(--teal-dark); font-size: .8rem; font-weight: 800; text-decoration: none; }
+    .empty { grid-column: 1 / -1; padding: 28px; border: 1px dashed #bfd4cb; border-radius: 17px; color: var(--muted); background: #fbfdfb; text-align: center; }
     code { overflow-wrap: anywhere; }
-    .row { display: grid; grid-template-columns: 1fr 1fr; gap: .8rem; }
-    .muted { opacity: .72; }
-    @media (max-width: 640px) { .row { grid-template-columns: 1fr; } }
+    .muted { color: var(--muted); }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    @media (max-width: 800px) { .topbar { margin-bottom: 45px; } .workspace { grid-template-columns: 1fr; } .cards { grid-template-columns: 1fr; } }
+    @media (max-width: 520px) { .shell { width: min(100% - 24px, 1180px); padding-top: 18px; } .row { grid-template-columns: 1fr; } h1 { font-size: 2.9rem; } .toplink { display: none; } }
   </style>
 </head>
 <body>
-  <h1>Biolab Evidence Workspace</h1>
-  <p class="muted">Local-first, auditable scientific evidence retrieval.</p>
-  <details>
-    <summary>Remote API key (optional)</summary>
-    <p class="muted">Stored only in this browser tab and sent as a Bearer header.</p>
-    <input id="api-key" type="password" placeholder="blb_…" autocomplete="off">
-  </details>
-  <form id="search-form">
-    <label>Scientific question
-      <input id="query" required placeholder="KRAS pancreatic cancer">
-    </label>
-    <div class="row">
-      <label>Sources
-        <input id="sources" value="pubmed,europepmc,clinicaltrials,uniprot,opentargets">
-      </label>
-      <label>Results per source
-        <input id="max-results" type="number" min="1" max="50" value="3">
-      </label>
+  <main class="shell">
+    <nav class="topbar" aria-label="Workspace navigation">
+      <div class="brand"><span class="mark" aria-hidden="true">B</span><span>biolab / evidence</span></div>
+      <span class="toplink">A traceable workspace for scientific questions</span>
+    </nav>
+    <header>
+      <p class="eyebrow">Evidence workspace · v0.4</p>
+      <h1>Trace every scientific answer back to its source.</h1>
+      <p class="lede">Search trusted life-science sources, preserve the returned evidence, and keep an audit trail that a reviewer can inspect later.</p>
+      <div class="signals" aria-label="Workspace guarantees">
+        <span class="signal"><span class="dot"></span>Local-first</span>
+        <span class="signal"><span class="dot"></span>Hash-chained retrievals</span>
+        <span class="signal"><span class="dot"></span>Human review required</span>
+      </div>
+    </header>
+    <div class="workspace">
+      <section class="panel main-panel" aria-labelledby="search-title">
+        <div class="panel-head">
+          <div><h2 id="search-title">Start an evidence pass</h2><p class="kicker">Ask one focused question. Biolab records what came back, from where, and when.</p></div>
+          <span class="badge">Step 01 / retrieve</span>
+        </div>
+        <form id="search-form">
+          <label for="query">Scientific question
+            <input id="query" required placeholder="e.g. KRAS variants in pancreatic cancer" autocomplete="off">
+          </label>
+          <div class="row">
+            <label for="sources">Sources
+              <input id="sources" value="pubmed,europepmc,clinicaltrials,uniprot,opentargets">
+            </label>
+            <label for="max-results">Results per source
+              <input id="max-results" type="number" min="1" max="50" value="3">
+            </label>
+          </div>
+          <button class="search-button" type="submit"><span id="search-label">Search and preserve evidence</span></button>
+        </form>
+        <p class="note"><strong>Evidence boundary:</strong> retrieval is not validation. Use the preserved records to support a claim, then review the underlying source and context.</p>
+      </section>
+      <aside class="stack" aria-label="Workspace controls">
+        <section class="panel side-panel">
+          <div class="panel-head"><div><h2>Audit ledger</h2><p class="kicker">Integrity status for preserved retrievals.</p></div><span aria-hidden="true">◌</span></div>
+          <div id="audit" class="status">Checking chain…</div>
+          <button id="verify" class="secondary" type="button" style="width:100%; margin-top:12px">Verify hash chain</button>
+        </section>
+        <section class="panel side-panel">
+          <div class="panel-head"><div><h2>Projects</h2><p class="kicker">Group evidence for a reviewable question.</p></div><span aria-hidden="true">＋</span></div>
+          <form id="project-form" class="mini-form">
+            <label class="sr-only" for="project-name">New project name</label>
+            <input id="project-name" required placeholder="New project name">
+            <button type="submit">Create project</button>
+          </form>
+          <ul id="projects" class="project-list"><li class="muted">Loading…</li></ul>
+          <div id="project-detail" class="project-detail" hidden></div>
+        </section>
+        <details class="panel side-panel">
+          <summary><strong>Remote API key</strong> <span class="muted">(optional)</span></summary>
+          <p class="kicker">Stored only in this browser tab and sent as a Bearer header.</p>
+          <label class="sr-only" for="api-key">API key</label>
+          <input id="api-key" type="password" placeholder="blb_…" autocomplete="off">
+        </details>
+      </aside>
     </div>
-    <button type="submit">Search and preserve evidence</button>
-  </form>
-  <div class="row" style="margin-top: 1rem">
-    <section class="panel">
-      <h2>Audit status</h2>
-      <p id="audit">Checking…</p>
-      <button id="verify" type="button">Verify hash chain</button>
+    <section class="results-section" aria-labelledby="evidence-title">
+      <div class="results-head"><div><p class="eyebrow">Evidence ledger</p><h2 id="evidence-title">Preserved results</h2><p id="summary" class="summary">Ready for your first evidence pass.</p></div><span class="badge">Step 02 / inspect</span></div>
+      <div id="results" class="cards"><div class="empty">Your evidence ledger is empty. Run a focused search to create the first preserved record.</div></div>
     </section>
-    <section class="panel">
-      <h2>Projects</h2>
-      <form id="project-form" style="border: 0; padding: 0">
-        <input id="project-name" required placeholder="New project name">
-        <button type="submit">Create project</button>
-      </form>
-      <ul id="projects"><li>Loading…</li></ul>
-    </section>
-  </div>
-  <h2>Evidence</h2>
-  <p id="summary" class="muted">Ready.</p>
-  <div id="results" class="cards"></div>
+  </main>
   <script>
     const form = document.querySelector('#search-form');
     const summary = document.querySelector('#summary');
     const results = document.querySelector('#results');
+    const apiBase = window.location.pathname.startsWith('/api') ? '/api' : '';
     const apiFetch = (url, options = {}) => {
       const key = document.querySelector('#api-key').value.trim();
       const headers = {...(options.headers || {})};
       if (key) headers.Authorization = `Bearer ${key}`;
-      return fetch(url, {...options, headers});
+      return fetch(`${apiBase}${url}`, {...options, headers});
     };
     const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, c => ({
       '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'
     }[c]));
+    const maskId = (value) => {
+      const id = String(value ?? '');
+      return id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-6)}` : id;
+    };
     async function verify() {
-      const response = await apiFetch('/v1/verify');
-      const result = await response.json();
-      document.querySelector('#audit').textContent = result.valid
-        ? `Valid — ${result.record_count} preserved retrievals`
-        : `Broken at ${result.first_broken_retrieval_id}`;
+      const audit = document.querySelector('#audit');
+      const button = document.querySelector('#verify');
+      try {
+        const response = await apiFetch('/v1/verify');
+        const result = await response.json();
+        audit.className = `status${result.valid ? '' : ' bad'}`;
+        audit.textContent = result.valid
+          ? `Chain valid · ${result.record_count} preserved retrievals`
+          : `Chain broken at ${result.first_broken_retrieval_id}`;
+        button.textContent = result.valid ? 'Verified just now' : 'Chain needs review';
+      } catch (error) { audit.className = 'status bad'; audit.textContent = 'Audit status unavailable'; }
     }
     async function loadProjects() {
       const response = await apiFetch('/v1/projects');
       const result = await response.json();
       document.querySelector('#projects').innerHTML = result.projects.length
-        ? result.projects.map(p => `<li><strong>${escapeHtml(p.name)}</strong><br><code>${p.project_id}</code></li>`).join('')
-        : '<li>No projects yet.</li>';
+        ? result.projects.map(p => `<li><button class="project-item" type="button" data-project-id="${escapeHtml(p.project_id)}"><strong>${escapeHtml(p.name)}</strong><code>${escapeHtml(maskId(p.project_id))}</code></button></li>`).join('')
+        : '<li class="muted">No projects yet.</li>';
+    }
+    async function loadProject(projectId) {
+      const detail = document.querySelector('#project-detail');
+      detail.hidden = false;
+      detail.textContent = 'Loading project report…';
+      try {
+        const response = await apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/report`);
+        if (!response.ok) {
+          if (response.status === 404) {
+            throw new Error('Project report unavailable. Configure TURSO_DATABASE_URL and TURSO_AUTH_TOKEN for durable Vercel storage, then create the project again.');
+          }
+          throw new Error(`Project report returned ${response.status}`);
+        }
+        const report = await response.json();
+        const project = report.project || {};
+        detail.innerHTML = `<strong>${escapeHtml(project.name || 'Project')}</strong><br>
+          ${escapeHtml(project.description || 'No description')}<br>
+          ${report.collections.length} collections · ${report.claims.length} claims · ${report.watches.length} watches<br>
+          <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report" target="_blank" rel="noreferrer">Open JSON report ↗</a> ·
+          <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report?format=markdown" target="_blank" rel="noreferrer">Open Markdown report ↗</a>`;
+      } catch (error) { detail.textContent = String(error); }
     }
     document.querySelector('#verify').addEventListener('click', verify);
+    document.querySelector('#projects').addEventListener('click', (event) => {
+      const button = event.target.closest('[data-project-id]');
+      if (button) loadProject(button.dataset.projectId);
+    });
     document.querySelector('#project-form').addEventListener('submit', async (event) => {
       event.preventDefault();
-      await apiFetch('/v1/projects', {method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({name: document.querySelector('#project-name').value})});
-      document.querySelector('#project-name').value = '';
-      await loadProjects();
+      const nameInput = document.querySelector('#project-name');
+      const detail = document.querySelector('#project-detail');
+      const name = nameInput.value.trim();
+      detail.hidden = false;
+      detail.textContent = 'Creating project…';
+      try {
+        const response = await apiFetch('/v1/projects', {method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({name})});
+        if (!response.ok) throw new Error(`Project creation returned ${response.status}`);
+        const created = await response.json();
+        nameInput.value = '';
+        await loadProjects();
+        if (created.project_id) await loadProject(created.project_id);
+      } catch (error) {
+        detail.textContent = String(error);
+      }
     });
     form.addEventListener('submit', async (event) => {
       event.preventDefault();
-      summary.textContent = 'Searching…';
+      const button = form.querySelector('button');
+      button.disabled = true;
+      document.querySelector('#search-label').textContent = 'Searching sources…';
+      summary.textContent = 'Searching sources and preserving returned records…';
       results.innerHTML = '';
       const payload = {
         query: document.querySelector('#query').value,
@@ -169,20 +299,21 @@ DASHBOARD_HTML = r"""<!doctype html>
         const result = await response.json();
         summary.textContent = `${result.retrieval_count} records preserved` +
           (Object.keys(result.errors).length ? `; errors: ${JSON.stringify(result.errors)}` : '');
+        await verify();
         const records = Object.values(result.sources).flat();
         results.innerHTML = records.map(record => {
           const snap = record.snapshot || {};
           const title = snap.title || snap.name || snap.primary_accession || record.external_id;
           const candidateUrl = snap.url || snap.canonical_url || '';
           const url = /^https?:\/\//i.test(candidateUrl) ? candidateUrl : '';
-          return `<article class="card"><span class="badge">${escapeHtml(record.source)}</span>
-            <h3>${escapeHtml(title)}</h3><div>${escapeHtml(record.external_id)}</div>
-            <div class="muted">retrieval <code>${escapeHtml(record.retrieval_id)}</code></div>
-            ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Open source</a>` : ''}</article>`;
-        }).join('') || '<p>No records returned.</p>';
+          return `<article class="evidence-card"><div class="card-meta"><span class="badge">${escapeHtml(record.source)}</span><span class="record-id">${escapeHtml(record.external_id)}</span></div>
+            <h3>${escapeHtml(title)}</h3><p>Preserved retrieval <code>${escapeHtml(record.retrieval_id)}</code></p>
+            ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Open source ↗</a>` : ''}</article>`;
+        }).join('') || '<div class="empty">No records returned. Check the source selection or broaden the question.</div>';
       } catch (error) {
-        summary.textContent = String(error);
-      }
+        summary.textContent = 'Search failed. The source error is preserved in the API response when available.';
+        results.innerHTML = `<div class="empty">${escapeHtml(error)}</div>`;
+      } finally { button.disabled = false; document.querySelector('#search-label').textContent = 'Search and preserve evidence'; }
     });
     verify(); loadProjects();
   </script>
@@ -424,7 +555,7 @@ class RestApiKeyAuthMiddleware:
             await self.app(scope, receive, send)
             return
         path = scope.get("path", "")
-        if path in {"/", "/health", "/openapi.json"}:
+        if path in {"/", "/health", "/openapi.json", "/.well-known/agent-card.json"}:
             await self.app(scope, receive, send)
             return
 
@@ -454,6 +585,7 @@ class RestApiKeyAuthMiddleware:
 def api_routes() -> list[Route]:
     """Return dashboard and REST routes for standalone or MCP-hosted use."""
     return [
+        *a2a.a2a_routes(),
         Route("/", dashboard),
         Route("/health", health),
         Route("/openapi.json", openapi),
@@ -482,6 +614,7 @@ def create_app(db_path: str | Path = "biolab.db", require_auth: bool = False) ->
     @asynccontextmanager
     async def lifespan(app: Starlette):
         app.state.conn = db.connect(str(db_path))
+        app.state.a2a_tasks = a2a.A2ATaskStore()
         try:
             yield
         finally:
