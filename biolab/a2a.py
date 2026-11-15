@@ -187,6 +187,16 @@ def _derived_operation(request: Request, metadata: dict[str, Any]) -> dict[str, 
         if report is None:
             raise ValueError("project not found")
         return report
+    if operation == "save_reviewed":
+        candidate_ids = metadata.get("candidate_ids", [])
+        if not isinstance(candidate_ids, list) or not all(isinstance(item, str) for item in candidate_ids):
+            raise ValueError("metadata.candidate_ids must be a list of strings")
+        return workspace.save_reviewed_candidates(
+            request.app.state.conn, str(metadata.get("project_id", "")),
+            str(metadata.get("ranking_run_id", "")), candidate_ids,
+            owner_id=f"a2a:{auth.current_identity.get()}",
+            override_note=str(metadata.get("override_note", "")),
+        )
     return None
 
 

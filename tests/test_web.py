@@ -110,6 +110,24 @@ def test_ranking_review_api_updates_candidate(tmp_path):
     assert response.json()["review_state"] == "accepted"
 
 
+def test_save_reviewed_candidates_requires_review_and_persists_collection_item(tmp_path):
+    app = create_app(tmp_path / "save-reviewed.db")
+    with TestClient(app) as client:
+        project = client.post("/v1/projects", json={"name": "Reviewed"}).json()
+        record = retrieval_log.write_retrieval(
+            app.state.conn, "KRAS", "1", "test", "pubmed", {}, "raw",
+            {"title": "KRAS paper", "abstract": "KRAS"},
+        )
+        run = client.post("/v1/rankings", json={"question": "KRAS", "retrieval_ids": [record.retrieval_id]}).json()
+        candidate = run["candidates"][0]
+        denied = client.post(f"/v1/projects/{project['project_id']}/save-reviewed", json={"ranking_run_id": run["ranking_run_id"], "candidate_ids": [candidate["ranking_candidate_id"]]})
+        client.post(f"/v1/rankings/{run['ranking_run_id']}/candidates/{candidate['ranking_candidate_id']}/review", json={"review_state": "accepted"})
+        saved = client.post(f"/v1/projects/{project['project_id']}/save-reviewed", json={"ranking_run_id": run["ranking_run_id"], "candidate_ids": [candidate["ranking_candidate_id"]]})
+    assert denied.status_code == 400
+    assert saved.status_code == 201
+    assert saved.json()["saved_retrieval_ids"] == [record.retrieval_id]
+
+
 def test_inference_api_returns_citations_and_flushes_parser_data(tmp_path):
     app = create_app(tmp_path / "inference.db")
     with TestClient(app) as client:

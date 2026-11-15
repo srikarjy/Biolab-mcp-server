@@ -397,6 +397,33 @@ The PDF renderer is intentionally text-focused. Durable multi-user hosting
 still requires `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, authenticated API keys,
 and organization-specific operational controls.
 
+## 2026-11-15 — Save reviewed ranking results into project storage
+
+### Problem
+
+The dashboard could record a review decision, but the reviewed paper still
+needed a safe, explicit transition into project evidence storage.
+
+### Solution
+
+Added an atomic save operation shared by REST, MCP, A2A, and the dashboard. It
+creates or reuses a `Reviewed ranking evidence` collection, requires accepted
+candidate state, records the ranking note and retrieval ID, and rolls back the
+whole operation on failure. An override note is required to save a non-accepted
+candidate.
+
+### Verification
+
+- Unit/API test proves unreviewed candidates are rejected and accepted ones are
+  persisted.
+- Hosted workflow returned project `201`, search `200`, ranking `201`, review
+  `200`, and reviewed-evidence save `201` with one saved retrieval.
+
+### Boundary preserved
+
+Saving evidence records a review decision and project relationship; it does not
+assert that the paper is true or clinically valid.
+
 ## Entry template
 
 Use this shape for future complex problems:

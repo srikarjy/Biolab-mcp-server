@@ -39,6 +39,7 @@ OPENAPI_SCHEMA = {
             "post": {"summary": "Create a project"},
         },
         "/v1/projects/{project_id}/report": {"get": {"summary": "Export a project report as JSON, Markdown, or PDF"}},
+        "/v1/projects/{project_id}/save-reviewed": {"post": {"summary": "Save accepted ranking candidates to project evidence"}},
         "/v1/collections": {
             "get": {"summary": "List evidence collections"},
             "post": {"summary": "Create an evidence collection"},
@@ -220,6 +221,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <div class="results-head"><div><p class="eyebrow">Review queue</p><h2 id="ranking-title">Top-ranked papers</h2><p id="ranking-summary" class="summary">Ranking preserved results…</p></div><span class="badge">Step 03 / review</span></div>
         <div id="ranking-results" class="ranking-cards"></div>
         <button id="generate-insights" class="secondary" type="button" style="margin-top:14px">Generate grounded insights</button>
+        <button id="save-reviewed" class="secondary" type="button" style="margin:14px 0 0 8px" disabled>Save accepted papers to selected project</button>
       </section>
       <section id="insight-section" class="insight-section" hidden aria-labelledby="insight-title">
         <div class="results-head"><div><p class="eyebrow">Evidence-grounded inference</p><h2 id="insight-title">Extracted insights</h2><p id="insight-summary" class="summary"></p></div><span class="badge">Step 04 / cite</span></div>
@@ -236,12 +238,14 @@ DASHBOARD_HTML = r"""<!doctype html>
     const rankingSummary = document.querySelector('#ranking-summary');
     const rankingResults = document.querySelector('#ranking-results');
     const generateInsights = document.querySelector('#generate-insights');
+    const saveReviewed = document.querySelector('#save-reviewed');
     const insightSection = document.querySelector('#insight-section');
     const insightSummary = document.querySelector('#insight-summary');
     const insights = document.querySelector('#insights');
     const flushParser = document.querySelector('#flush-parser');
     let latestRecords = [];
     let latestRanking = null;
+    let latestProjectId = null;
     let latestInferenceRunId = null;
     const apiBase = window.location.pathname.startsWith('/api') ? '/api' : '';
     const apiFetch = (url, options = {}) => {
@@ -299,9 +303,26 @@ DASHBOARD_HTML = r"""<!doctype html>
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || `Review returned ${response.status}`);
+        const reviewed = latestRanking?.candidates?.find(candidate => candidate.ranking_candidate_id === card.dataset.candidateId);
+        if (reviewed) reviewed.review_state = result.review_state;
+        saveReviewed.disabled = !(latestProjectId && latestRanking?.candidates?.some(candidate => candidate.review_state === 'accepted'));
         status.textContent = `Marked ${result.review_state}`;
       } catch (error) { status.textContent = String(error); }
       finally { button.disabled = false; }
+    });
+    saveReviewed.addEventListener('click', async () => {
+      if (!latestProjectId || !latestRanking) return;
+      const accepted = latestRanking.candidates.filter(candidate => candidate.review_state === 'accepted').map(candidate => candidate.ranking_candidate_id);
+      if (!accepted.length) return;
+      saveReviewed.disabled = true;
+      try {
+        const response = await apiFetch(`/v1/projects/${encodeURIComponent(latestProjectId)}/save-reviewed`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ranking_run_id: latestRanking.ranking_run_id, candidate_ids: accepted})});
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Save returned ${response.status}`);
+        document.querySelector('#project-detail').hidden = false;
+        document.querySelector('#project-detail').textContent = `Saved ${result.saved_count} reviewed paper(s) to the project collection.`;
+      } catch (error) { document.querySelector('#project-detail').textContent = String(error); }
+      finally { saveReviewed.disabled = false; }
     });
     function renderInsights(result) {
       insightSummary.textContent = `${result.insight_count ?? result.claims?.length ?? 0} grounded insights · ${result.parser_version}`;
@@ -359,6 +380,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         : '<li class="muted">No projects yet.</li>';
     }
     async function loadProject(projectId) {
+      latestProjectId = projectId;
+      saveReviewed.disabled = !(latestRanking?.candidates?.some(candidate => candidate.review_state === 'accepted'));
       const detail = document.querySelector('#project-detail');
       detail.hidden = false;
       detail.textContent = 'Loading project report…';
@@ -453,6 +476,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           if (!rankingResponse.ok) throw new Error(rankingResult.error || `Ranking returned ${rankingResponse.status}`);
           latestRanking = rankingResult;
           renderRanking(rankingResult, records);
+          saveReviewed.disabled = !(latestProjectId && rankingResult.candidates.some(candidate => candidate.review_state === 'accepted'));
         }
       } catch (error) {
         summary.textContent = 'Search failed. The source error is preserved in the API response when available.';
@@ -660,6 +684,22 @@ async def project_report(request: Request):
     return JSONResponse(report)
 
 
+async def save_reviewed_project_evidence(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        candidate_ids = payload.get("candidate_ids", [])
+        if not isinstance(candidate_ids, list) or not all(isinstance(item, str) for item in candidate_ids):
+            return JSONResponse({"error": "candidate_ids must be a list of strings"}, status_code=400)
+        result = workspace.save_reviewed_candidates(
+            request.app.state.conn, request.path_params["project_id"],
+            str(payload.get("ranking_run_id", "")), candidate_ids,
+            auth.bind_agent_id("anonymous", request), str(payload.get("override_note", "")),
+        )
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result, status_code=201)
+
+
 async def collections(request: Request) -> JSONResponse:
     if request.method == "GET":
         return JSONResponse({
@@ -839,6 +879,7 @@ def api_routes() -> list[Route]:
         Route("/v1/verify", verify),
         Route("/v1/projects", projects, methods=["GET", "POST"]),
         Route("/v1/projects/{project_id}/report", project_report),
+        Route("/v1/projects/{project_id}/save-reviewed", save_reviewed_project_evidence, methods=["POST"]),
         Route("/v1/collections", collections, methods=["GET", "POST"]),
         Route("/v1/collections/{collection_id}", collection_detail),
         Route("/v1/collections/{collection_id}/items", collection_items, methods=["POST"]),

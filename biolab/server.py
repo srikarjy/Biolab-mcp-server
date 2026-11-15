@@ -368,6 +368,16 @@ def export_project_report(project_id: str, format: str = "markdown") -> dict:
     }
 
 
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def save_reviewed_evidence(
+    project_id: str, ranking_run_id: str, candidate_ids: list[str], override_note: str = ""
+) -> dict:
+    """Save accepted ranked candidates to the project's reviewed evidence collection."""
+    return workspace.save_reviewed_candidates(
+        _conn, project_id, ranking_run_id, candidate_ids, override_note=override_note
+    )
+
+
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)
 def search_pubmed(query: str, agent_id: str, ctx: Context, max_results: int = 5) -> dict:
     """Search PubMed and log every retrieved paper to the audit trail.

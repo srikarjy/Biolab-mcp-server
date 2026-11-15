@@ -41,6 +41,9 @@ it does not validate scientific conclusions or provide clinical advice.
 - Project owner and organization-member schema with service-layer project
   listing/report checks; hosted multi-organization deployment still requires
   authenticated keys and durable Turso storage.
+- Atomic reviewed-evidence save path from ranking candidates into a project
+  collection; unreviewed candidates are rejected unless an explicit override
+  note is supplied.
 - Offline demo, integrity verification, package metadata, and test coverage.
 
 ## Architecture boundaries

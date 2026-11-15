@@ -99,6 +99,54 @@ def create_collection(conn: Any, project_id: str, name: str, description: str = 
     return collection
 
 
+def save_reviewed_candidates(
+    conn: Any, project_id: str, ranking_run_id: str, candidate_ids: list[str],
+    owner_id: str | None = None, override_note: str = "",
+) -> dict:
+    """Atomically save accepted ranking candidates into a project collection."""
+    if owner_id is not None and not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
+    if not candidate_ids:
+        raise ValueError("candidate_ids must not be empty")
+    rows = conn.execute(
+        """SELECT ranking_candidate_id, retrieval_id, review_state, review_note, rank
+           FROM ranking_candidates WHERE ranking_run_id = ? AND ranking_candidate_id IN ({})""".format(
+            ",".join("?" for _ in candidate_ids)
+        ),
+        (ranking_run_id, *candidate_ids),
+    ).fetchall()
+    if len(rows) != len(set(candidate_ids)):
+        raise ValueError("one or more ranking candidates were not found in this run")
+    rejected = [row[0] for row in rows if row[2] != "accepted" and not override_note.strip()]
+    if rejected:
+        raise ValueError("only accepted candidates can be saved without override_note")
+    collection_row = conn.execute(
+        "SELECT collection_id FROM evidence_collections WHERE project_id = ? AND name = ?",
+        (project_id, "Reviewed ranking evidence"),
+    ).fetchone()
+    if collection_row is None:
+        collection = create_collection(conn, project_id, "Reviewed ranking evidence", "Saved from a reviewed ranking run", owner_id)
+        collection_id = collection["collection_id"]
+    else:
+        collection_id = collection_row[0]
+    saved: list[str] = []
+    try:
+        for _candidate_id, retrieval_id, _review_state, review_note, rank in rows:
+            note = override_note.strip() or review_note or f"Accepted from rank {rank}"
+            conn.execute(
+                """INSERT INTO collection_items (collection_id, retrieval_id, note, relevance, added_at)
+                   VALUES (?, ?, ?, 'relevant', ?)
+                   ON CONFLICT(collection_id, retrieval_id) DO UPDATE SET note=excluded.note, relevance='relevant'""",
+                (collection_id, retrieval_id, note, _now()),
+            )
+            saved.append(retrieval_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {"project_id": project_id, "ranking_run_id": ranking_run_id, "collection_id": collection_id, "saved_retrieval_ids": saved, "saved_count": len(saved)}
+
+
 def list_collections(conn: Any, project_id: str | None = None) -> list[dict]:
     where = "WHERE project_id = ?" if project_id else ""
     params = (project_id,) if project_id else ()
