@@ -174,6 +174,62 @@ CREATE TABLE IF NOT EXISTS ranking_candidates (
 CREATE INDEX IF NOT EXISTS idx_ranking_runs_project ON ranking_runs(project_id);
 CREATE INDEX IF NOT EXISTS idx_ranking_candidates_run ON ranking_candidates(ranking_run_id, rank);
 CREATE INDEX IF NOT EXISTS idx_ranking_candidates_retrieval ON ranking_candidates(retrieval_id);
+
+CREATE TABLE IF NOT EXISTS inference_runs (
+    inference_run_id  TEXT PRIMARY KEY,
+    project_id        TEXT,
+    ranking_run_id    TEXT,
+    question          TEXT NOT NULL,
+    parser_version    TEXT NOT NULL,
+    model_provider    TEXT NOT NULL,
+    model_name        TEXT NOT NULL,
+    status            TEXT NOT NULL,
+    created_by        TEXT NOT NULL,
+    created_at        TEXT NOT NULL,
+    completed_at      TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id),
+    FOREIGN KEY (ranking_run_id) REFERENCES ranking_runs(ranking_run_id)
+);
+
+CREATE TABLE IF NOT EXISTS inference_claims (
+    claim_id          TEXT PRIMARY KEY,
+    inference_run_id  TEXT NOT NULL,
+    claim_text        TEXT NOT NULL,
+    review_state      TEXT NOT NULL DEFAULT 'unreviewed',
+    created_at        TEXT NOT NULL,
+    FOREIGN KEY (inference_run_id) REFERENCES inference_runs(inference_run_id)
+);
+
+CREATE TABLE IF NOT EXISTS claim_citations (
+    citation_id       TEXT PRIMARY KEY,
+    claim_id          TEXT NOT NULL,
+    retrieval_id      TEXT NOT NULL,
+    field_name        TEXT NOT NULL,
+    span_start        INTEGER NOT NULL,
+    span_end          INTEGER NOT NULL,
+    excerpt_hash      TEXT NOT NULL,
+    locator           TEXT NOT NULL,
+    FOREIGN KEY (claim_id) REFERENCES inference_claims(claim_id),
+    FOREIGN KEY (retrieval_id) REFERENCES retrievals(retrieval_id)
+);
+
+CREATE TABLE IF NOT EXISTS parser_chunks (
+    chunk_id          TEXT PRIMARY KEY,
+    inference_run_id  TEXT NOT NULL,
+    retrieval_id      TEXT NOT NULL,
+    field_name        TEXT NOT NULL,
+    chunk_index       INTEGER NOT NULL,
+    chunk_text        TEXT NOT NULL,
+    created_at        TEXT NOT NULL,
+    FOREIGN KEY (inference_run_id) REFERENCES inference_runs(inference_run_id),
+    FOREIGN KEY (retrieval_id) REFERENCES retrievals(retrieval_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_inference_runs_project ON inference_runs(project_id);
+CREATE INDEX IF NOT EXISTS idx_inference_claims_run ON inference_claims(inference_run_id);
+CREATE INDEX IF NOT EXISTS idx_claim_citations_claim ON claim_citations(claim_id);
+CREATE INDEX IF NOT EXISTS idx_claim_citations_retrieval ON claim_citations(retrieval_id);
+CREATE INDEX IF NOT EXISTS idx_parser_chunks_run ON parser_chunks(inference_run_id);
 """
 
 # Tracks the target (Turso URL or local path) most recently connected to, so

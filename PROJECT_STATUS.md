@@ -33,6 +33,9 @@ it does not validate scientific conclusions or provide clinical advice.
 - Dashboard review queue for automatically ranked results, with top-five score
   explanations and accepted/rejected/conflicting review decisions persisted by
   ranking candidate ID.
+- Citation-safe grounded extraction from preserved titles and abstracts, with
+  stored parser chunks, exact citation spans, excerpt hashes, inspectable
+  inference runs, and an explicit flush operation for temporary parser data.
 - Offline demo, integrity verification, package metadata, and test coverage.
 
 ## Architecture boundaries

@@ -110,6 +110,28 @@ def test_ranking_review_api_updates_candidate(tmp_path):
     assert response.json()["review_state"] == "accepted"
 
 
+def test_inference_api_returns_citations_and_flushes_parser_data(tmp_path):
+    app = create_app(tmp_path / "inference.db")
+    with TestClient(app) as client:
+        record = retrieval_log.write_retrieval(
+            app.state.conn, "KRAS cancer", "1", "test", "pubmed", {}, "raw",
+            {"title": "KRAS signal", "abstract": "KRAS is associated with pancreatic cancer."},
+        )
+        created = client.post(
+            "/v1/inferences",
+            json={"question": "KRAS cancer", "retrieval_ids": [record.retrieval_id]},
+        )
+        inference_run_id = created.json()["inference_run_id"]
+        detail = client.get(f"/v1/inferences/{inference_run_id}")
+        flushed = client.post(f"/v1/inferences/{inference_run_id}/flush")
+        after = client.get(f"/v1/inferences/{inference_run_id}")
+
+    assert created.status_code == 201
+    assert detail.json()["claims"][0]["citations"][0]["retrieval_id"] == record.retrieval_id
+    assert flushed.json()["claims_preserved"] is True
+    assert after.json()["parser_chunk_count"] == 0
+
+
 def test_bad_request_and_missing_retrieval(tmp_path):
     with TestClient(create_app(tmp_path / "web.db")) as client:
         bad = client.post("/v1/evidence/search", json={"query": "", "max_results": 0})

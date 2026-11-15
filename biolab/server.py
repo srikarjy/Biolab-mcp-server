@@ -16,6 +16,7 @@ from biolab import (
     db,
     europepmc_client,
     executions,
+    inference,
     pubmed_client,
     ranking,
     retrieval_log,
@@ -144,6 +145,39 @@ def review_ranked_candidate(
         _conn, ranking_run_id, ranking_candidate_id,
         review_state=review_state, reviewed_by=reviewed_by, review_note=review_note,
     )
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def create_grounded_insights(
+    question: str,
+    retrieval_ids: list[str],
+    created_by: str,
+    ctx: Context,
+    project_id: str | None = None,
+    ranking_run_id: str | None = None,
+    max_insights: int = 10,
+) -> dict:
+    """Extract insights only from preserved evidence and return citation spans."""
+    return inference.create_inference(
+        _conn, question, retrieval_ids,
+        created_by=_bound(created_by, ctx), project_id=project_id,
+        ranking_run_id=ranking_run_id, max_insights=max_insights,
+    )
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_grounded_insights(inference_run_id: str) -> dict:
+    """Fetch grounded claims and their validated retrieval citations."""
+    result = inference.get_inference(_conn, inference_run_id)
+    if result is None:
+        raise ValueError("inference run not found")
+    return result
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def flush_grounded_parser_data(inference_run_id: str) -> dict:
+    """Delete temporary parser chunks while preserving claims and citations."""
+    return inference.flush_parser_chunks(_conn, inference_run_id)
 
 
 @mcp.tool(name="search", annotations=SEARCH_ANNOTATIONS)

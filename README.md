@@ -168,6 +168,22 @@ The multi-source operation preserves source-specific results and explicit
 source errors. A returned record is preserved evidence, not an assertion that
 the result is relevant or scientifically correct.
 
+Extract citation-safe grounded insights from preserved results:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/inferences \
+  -H 'content-type: application/json' \
+  -d '{"question":"KRAS pancreatic cancer", "retrieval_ids":["<retrieval_id>"], "max_insights":5}'
+```
+
+The parser is deterministic and provider-free. It extracts only sentences
+present in preserved title or abstract fields, stores exact field offsets, and
+returns a citation locator plus excerpt hash for every insight. It is an
+evidence extraction aid, not an LLM-generated conclusion or scientific
+validation. Use `GET /v1/inferences/{inference_run_id}` to inspect a run and
+`POST /v1/inferences/{inference_run_id}/flush` to remove temporary parser
+chunks while retaining derived claims and citations.
+
 ## Organize reviewed evidence
 
 ```bash
@@ -218,6 +234,9 @@ Important REST routes:
 POST /v1/evidence/search
 POST /v1/rankings
 GET  /v1/rankings/{ranking_run_id}
+POST /v1/inferences
+GET  /v1/inferences/{inference_run_id}
+POST /v1/inferences/{inference_run_id}/flush
 GET  /v1/retrievals/{retrieval_id}
 GET  /v1/projects
 POST /v1/projects

@@ -337,6 +337,37 @@ MCP expose the same review operation.
 The review queue records a scientist or agent decision; it does not convert a
 ranking into a scientific conclusion or clinical recommendation.
 
+## 2026-11-15 — Citation-safe grounded extraction and disposable parser data
+
+### Problem
+
+Parsing five papers is useful only if every extracted insight can be traced to
+the exact preserved source text and temporary parser state can be removed
+without breaking later review.
+
+### Solution
+
+Added `inference_runs`, `inference_claims`, `claim_citations`, and
+`parser_chunks`. The deterministic extractor reads only preserved title and
+abstract fields, stores sentence offsets and SHA-256 excerpt hashes, and
+returns zero insights when query terms do not match. `flush_parser_chunks`
+deletes only temporary chunks; claim rows and citation links remain inspectable
+and reconstruct excerpts from the durable retrieval snapshot.
+
+### Verification
+
+- Unit and REST tests cover extraction, citation offsets, unknown retrievals,
+  inspection, and flush preservation.
+- Hosted browser QA completed search -> preserve -> rank -> inference -> flush.
+- Production network log showed successful `/v1/inferences` (201) and flush
+  (200); no console errors or warnings.
+
+### Boundary preserved
+
+The parser is not an LLM and does not infer unsupported conclusions. A future
+model-backed summarizer must consume these citations and remain a separate,
+reviewable layer.
+
 ## Entry template
 
 Use this shape for future complex problems:

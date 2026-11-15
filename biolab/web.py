@@ -13,7 +13,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
-from biolab import a2a, auth, db, evidence, ranking, retrieval_log, workspace
+from biolab import a2a, auth, db, evidence, inference, ranking, retrieval_log, workspace
 
 OPENAPI_SCHEMA = {
     "openapi": "3.1.0",
@@ -29,6 +29,9 @@ OPENAPI_SCHEMA = {
         "/v1/rankings": {"post": {"summary": "Rank preserved retrievals with explanations"}},
         "/v1/rankings/{ranking_run_id}": {"get": {"summary": "Get a ranking run"}},
         "/v1/rankings/{ranking_run_id}/candidates/{ranking_candidate_id}/review": {"post": {"summary": "Review a ranked candidate"}},
+        "/v1/inferences": {"post": {"summary": "Create citation-safe grounded insights"}},
+        "/v1/inferences/{inference_run_id}": {"get": {"summary": "Get grounded insights and citations"}},
+        "/v1/inferences/{inference_run_id}/flush": {"post": {"summary": "Flush disposable parser chunks"}},
         "/v1/retrievals/{retrieval_id}": {"get": {"summary": "Fetch a preserved retrieval"}},
         "/v1/verify": {"get": {"summary": "Verify the audit hash chain"}},
         "/v1/projects": {
@@ -136,6 +139,10 @@ DASHBOARD_HTML = r"""<!doctype html>
     .review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; }
     .review-actions button { min-height: 34px; padding: .45rem .65rem; font-size: .7rem; }
     .review-status { color: var(--teal-dark); font-size: .72rem; font-weight: 800; }
+    .insight-section { margin-top: 26px; padding: 18px; border: 1px solid #d8e4eb; border-radius: 16px; background: #fbfdff; }
+    .insight-card { padding: 13px 0; border-top: 1px solid #e5edf1; color: #405963; font-size: .82rem; line-height: 1.5; }
+    .insight-card:first-child { border-top: 0; }
+    .citation { display: inline-block; margin: 7px 5px 0 0; padding: 4px 7px; border-radius: 7px; color: var(--teal-dark); background: #e1f4e8; font-size: .69rem; font-weight: 800; }
     .empty { grid-column: 1 / -1; padding: 28px; border: 1px dashed #bfd4cb; border-radius: 17px; color: var(--muted); background: #fbfdfb; text-align: center; }
     code { overflow-wrap: anywhere; }
     .muted { color: var(--muted); }
@@ -212,6 +219,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       <section id="ranking-section" class="ranking-section" hidden aria-labelledby="ranking-title">
         <div class="results-head"><div><p class="eyebrow">Review queue</p><h2 id="ranking-title">Top-ranked papers</h2><p id="ranking-summary" class="summary">Ranking preserved results…</p></div><span class="badge">Step 03 / review</span></div>
         <div id="ranking-results" class="ranking-cards"></div>
+        <button id="generate-insights" class="secondary" type="button" style="margin-top:14px">Generate grounded insights</button>
+      </section>
+      <section id="insight-section" class="insight-section" hidden aria-labelledby="insight-title">
+        <div class="results-head"><div><p class="eyebrow">Evidence-grounded inference</p><h2 id="insight-title">Extracted insights</h2><p id="insight-summary" class="summary"></p></div><span class="badge">Step 04 / cite</span></div>
+        <div id="insights" class="insight-cards"></div>
+        <button id="flush-parser" class="secondary" type="button" style="margin-top:12px">Flush temporary parser data</button>
       </section>
     </section>
   </main>
@@ -222,6 +235,14 @@ DASHBOARD_HTML = r"""<!doctype html>
     const rankingSection = document.querySelector('#ranking-section');
     const rankingSummary = document.querySelector('#ranking-summary');
     const rankingResults = document.querySelector('#ranking-results');
+    const generateInsights = document.querySelector('#generate-insights');
+    const insightSection = document.querySelector('#insight-section');
+    const insightSummary = document.querySelector('#insight-summary');
+    const insights = document.querySelector('#insights');
+    const flushParser = document.querySelector('#flush-parser');
+    let latestRecords = [];
+    let latestRanking = null;
+    let latestInferenceRunId = null;
     const apiBase = window.location.pathname.startsWith('/api') ? '/api' : '';
     const apiFetch = (url, options = {}) => {
       const key = document.querySelector('#api-key').value.trim();
@@ -281,6 +302,41 @@ DASHBOARD_HTML = r"""<!doctype html>
         status.textContent = `Marked ${result.review_state}`;
       } catch (error) { status.textContent = String(error); }
       finally { button.disabled = false; }
+    });
+    function renderInsights(result) {
+      insightSummary.textContent = `${result.insight_count ?? result.claims?.length ?? 0} grounded insights · ${result.parser_version}`;
+      insights.innerHTML = (result.insights || result.claims || []).map(claim => {
+        const citations = (claim.citations || []).map(citation => `<span class="citation">${escapeHtml(citation.source)}:${escapeHtml(citation.external_id)} · ${escapeHtml(citation.field_name)} · ${escapeHtml(citation.excerpt || 'span preserved')}</span>`).join('');
+        return `<article class="insight-card"><strong>${escapeHtml(claim.text)}</strong><div>${citations}</div></article>`;
+      }).join('') || '<div class="empty">No grounded sentence matched the question terms.</div>';
+    }
+    generateInsights.addEventListener('click', async () => {
+      if (!latestRanking || !latestRecords.length) return;
+      generateInsights.disabled = true;
+      insightSection.hidden = false;
+      insightSummary.textContent = 'Parsing preserved evidence and validating citations…';
+      try {
+        const response = await apiFetch('/v1/inferences', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({question: document.querySelector('#query').value, retrieval_ids: latestRecords.map(record => record.retrieval_id), ranking_run_id: latestRanking.ranking_run_id, max_insights: 10, created_by: 'web:local'})
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Inference returned ${response.status}`);
+        latestInferenceRunId = result.inference_run_id;
+        renderInsights(result);
+      } catch (error) { insightSummary.textContent = String(error); }
+      finally { generateInsights.disabled = false; }
+    });
+    flushParser.addEventListener('click', async () => {
+      if (!latestInferenceRunId) return;
+      flushParser.disabled = true;
+      try {
+        const response = await apiFetch(`/v1/inferences/${encodeURIComponent(latestInferenceRunId)}/flush`, {method: 'POST'});
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Flush returned ${response.status}`);
+        insightSummary.textContent += ` · ${result.flushed_parser_chunks} temporary chunks flushed; citations preserved`;
+      } catch (error) { insightSummary.textContent = String(error); }
+      finally { flushParser.disabled = false; }
     });
     async function verify() {
       const audit = document.querySelector('#audit');
@@ -356,6 +412,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       results.innerHTML = '';
       rankingSection.hidden = true;
       rankingResults.innerHTML = '';
+      insightSection.hidden = true;
+      insights.innerHTML = '';
+      latestRecords = [];
+      latestRanking = null;
+      latestInferenceRunId = null;
       const payload = {
         query: document.querySelector('#query').value,
         sources: document.querySelector('#sources').value.split(',').map(x => x.trim()).filter(Boolean),
@@ -371,6 +432,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           (Object.keys(result.errors).length ? `; errors: ${JSON.stringify(result.errors)}` : '');
         await verify();
         const records = Object.values(result.sources).flat();
+        latestRecords = records;
         results.innerHTML = records.map(record => {
           const snap = record.snapshot || {};
           const title = snap.title || snap.name || snap.primary_accession || record.external_id;
@@ -389,6 +451,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           });
           const rankingResult = await rankingResponse.json();
           if (!rankingResponse.ok) throw new Error(rankingResult.error || `Ranking returned ${rankingResponse.status}`);
+          latestRanking = rankingResult;
           renderRanking(rankingResult, records);
         }
       } catch (error) {
@@ -516,6 +579,43 @@ async def ranking_review(request: Request) -> JSONResponse:
         )
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result)
+
+
+async def inferences(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        retrieval_ids = payload.get("retrieval_ids", [])
+        if not isinstance(retrieval_ids, list) or not all(isinstance(item, str) for item in retrieval_ids):
+            return JSONResponse({"error": "retrieval_ids must be a list of strings"}, status_code=400)
+        result = inference.create_inference(
+            request.app.state.conn,
+            str(payload.get("question", "")),
+            retrieval_ids,
+            created_by=auth.bind_agent_id(str(payload.get("created_by", "api:inference")), request),
+            project_id=str(payload["project_id"]) if payload.get("project_id") else None,
+            ranking_run_id=str(payload["ranking_run_id"]) if payload.get("ranking_run_id") else None,
+            max_insights=int(payload.get("max_insights", 10)),
+        )
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result, status_code=201)
+
+
+async def inference_detail(request: Request) -> JSONResponse:
+    result = inference.get_inference(request.app.state.conn, request.path_params["inference_run_id"])
+    if result is None:
+        return JSONResponse({"error": "inference run not found"}, status_code=404)
+    return JSONResponse(result)
+
+
+async def inference_flush(request: Request) -> JSONResponse:
+    try:
+        result = inference.flush_parser_chunks(
+            request.app.state.conn, request.path_params["inference_run_id"]
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
     return JSONResponse(result)
 
 
@@ -724,6 +824,9 @@ def api_routes() -> list[Route]:
         Route("/v1/rankings", rankings, methods=["POST"]),
         Route("/v1/rankings/{ranking_run_id}", ranking_detail),
         Route("/v1/rankings/{ranking_run_id}/candidates/{ranking_candidate_id}/review", ranking_review, methods=["POST"]),
+        Route("/v1/inferences", inferences, methods=["POST"]),
+        Route("/v1/inferences/{inference_run_id}", inference_detail),
+        Route("/v1/inferences/{inference_run_id}/flush", inference_flush, methods=["POST"]),
         Route("/v1/retrievals/{retrieval_id}", get_retrieval),
         Route("/v1/verify", verify),
         Route("/v1/projects", projects, methods=["GET", "POST"]),
