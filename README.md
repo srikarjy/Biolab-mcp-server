@@ -320,11 +320,11 @@ PDF pages for the selected model.
 
 When the optional pgvector path is configured (`DATABASE_URL` or
 `PGVECTOR_DATABASE_URL`, plus `BIOLAB_EMBEDDING_API_URL` and
-`BIOLAB_EMBEDDING_API_KEY`), each non-empty parsed block is also stored in the
-separate `biolab_parser_chunks` vector table with its parser run, page number,
-block type, and text. Flushing a parser run removes both its local parsed blocks
-and its cloud vector chunks while preserving parser-run metadata and reviewed
-citations.
+`BIOLAB_EMBEDDING_API_KEY`), each parsed block explicitly accepted by a
+scientist is stored in the separate `biolab_parser_chunks` vector table with its
+parser run, page number, section, block type, and text. Flushing a parser run
+removes both its local parsed blocks and its cloud vector chunks while preserving
+parser-run metadata and reviewed citations.
 
 When `DEEPSEEK_API_KEY` is present, inference uses DeepSeek’s structured
 grounded-generation path. When the database and embedding provider are also
