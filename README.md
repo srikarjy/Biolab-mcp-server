@@ -198,6 +198,18 @@ biolab claims link <claim_id> <retrieval_id> \
 biolab projects report <project_id> --output kras-report.md
 ```
 
+The same project report is available as JSON (default), Markdown, or a
+server-rendered PDF:
+
+```text
+GET /v1/projects/{project_id}/report
+GET /v1/projects/{project_id}/report?format=markdown
+GET /v1/projects/{project_id}/report?format=pdf
+```
+
+Exports are checksummed and recorded. PDF generation is text-focused and
+server-side, so it does not depend on browser state.
+
 The `human_reviewed` assessment is an explicit workflow value. It must not be
 used to imply that Biolab itself performed the review.
 
@@ -259,6 +271,12 @@ POST /a2a
 
 The A2A endpoint accepts the supported JSON-RPC task shape documented in
 [`docs/A2A.md`](docs/A2A.md).
+
+A2A `message/send` also accepts `metadata.operation` values `rank`,
+`grounded_insights`, and `project_report`; these call the same ranking,
+inference, and report services used by REST and MCP. File downloads are
+explicitly reported as unsupported in the Agent Card; request report JSON or
+use the REST PDF endpoint when the client supports binary downloads.
 
 ## Storage and deployment
 

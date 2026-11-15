@@ -62,7 +62,24 @@ CREATE TABLE IF NOT EXISTS projects (
     project_id   TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     description  TEXT NOT NULL DEFAULT '',
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    owner_id     TEXT NOT NULL DEFAULT 'local',
+    organization_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS organizations (
+    organization_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS organization_members (
+    organization_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (organization_id, member_id),
+    FOREIGN KEY (organization_id) REFERENCES organizations(organization_id)
 );
 
 CREATE TABLE IF NOT EXISTS evidence_collections (
@@ -230,6 +247,14 @@ CREATE INDEX IF NOT EXISTS idx_inference_claims_run ON inference_claims(inferenc
 CREATE INDEX IF NOT EXISTS idx_claim_citations_claim ON claim_citations(claim_id);
 CREATE INDEX IF NOT EXISTS idx_claim_citations_retrieval ON claim_citations(retrieval_id);
 CREATE INDEX IF NOT EXISTS idx_parser_chunks_run ON parser_chunks(inference_run_id);
+
+CREATE TABLE IF NOT EXISTS exports (
+    export_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, format TEXT NOT NULL,
+    status TEXT NOT NULL, checksum TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+    created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_exports_project ON exports(project_id, created_at);
 """
 
 # Tracks the target (Turso URL or local path) most recently connected to, so
@@ -278,6 +303,14 @@ def _upgrade_retrievals(conn: Any) -> None:
         conn.execute("ALTER TABLE retrievals ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 1")
 
 
+def _upgrade_projects(conn: Any) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
+    if "owner_id" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'local'")
+    if "organization_id" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN organization_id TEXT")
+
+
 def connect(db_path: str) -> Any:
     global _current_target
     target, token = resolve_target(db_path)
@@ -285,6 +318,9 @@ def connect(db_path: str) -> Any:
     conn = open_connection(target, token)
     conn.executescript(SCHEMA_V2)
     _upgrade_retrievals(conn)
+    _upgrade_projects(conn)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_org ON projects(organization_id)")
     conn.commit()
     _current_target = target
     return conn

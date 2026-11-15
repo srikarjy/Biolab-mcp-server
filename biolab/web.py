@@ -10,10 +10,10 @@ from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
-from biolab import a2a, auth, db, evidence, inference, ranking, retrieval_log, workspace
+from biolab import a2a, auth, db, evidence, exports, inference, ranking, retrieval_log, workspace
 
 OPENAPI_SCHEMA = {
     "openapi": "3.1.0",
@@ -38,7 +38,7 @@ OPENAPI_SCHEMA = {
             "get": {"summary": "List projects"},
             "post": {"summary": "Create a project"},
         },
-        "/v1/projects/{project_id}/report": {"get": {"summary": "Export a project report"}},
+        "/v1/projects/{project_id}/report": {"get": {"summary": "Export a project report as JSON, Markdown, or PDF"}},
         "/v1/collections": {
             "get": {"summary": "List evidence collections"},
             "post": {"summary": "Create an evidence collection"},
@@ -629,12 +629,13 @@ async def verify(request: Request) -> JSONResponse:
 
 
 async def projects(request: Request) -> JSONResponse:
+    owner_id = auth.bind_agent_id("anonymous", request)
     if request.method == "GET":
-        return JSONResponse({"projects": workspace.list_projects(request.app.state.conn)})
+        return JSONResponse({"projects": workspace.list_projects(request.app.state.conn, owner_id)})
     try:
         payload = await request.json()
         project = workspace.create_project(
-            request.app.state.conn, str(payload.get("name", "")), str(payload.get("description", ""))
+            request.app.state.conn, str(payload.get("name", "")), str(payload.get("description", "")), owner_id
         )
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -643,12 +644,19 @@ async def projects(request: Request) -> JSONResponse:
 
 async def project_report(request: Request):
     report = workspace.get_project_report(
-        request.app.state.conn, request.path_params["project_id"]
+        request.app.state.conn, request.path_params["project_id"], auth.bind_agent_id("anonymous", request)
     )
     if report is None:
         return JSONResponse({"error": "project not found"}, status_code=404)
-    if request.query_params.get("format") == "markdown":
-        return PlainTextResponse(workspace.render_project_markdown(report), media_type="text/markdown")
+    format_name = request.query_params.get("format", "json").lower()
+    if format_name == "markdown":
+        markdown = workspace.render_project_markdown(report)
+        exports.record_export(request.app.state.conn, request.path_params["project_id"], format_name, markdown.encode(), auth.bind_agent_id("api:export", request))
+        return PlainTextResponse(markdown, media_type="text/markdown", headers={"Content-Disposition": "attachment; filename=biolab-report.md"})
+    if format_name == "pdf":
+        content = exports.markdown_to_pdf(workspace.render_project_markdown(report))
+        exports.record_export(request.app.state.conn, request.path_params["project_id"], format_name, content, auth.bind_agent_id("api:export", request))
+        return Response(content, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=biolab-report.pdf"})
     return JSONResponse(report)
 
 

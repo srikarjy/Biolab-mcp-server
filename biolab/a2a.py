@@ -17,7 +17,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from biolab import auth
+from biolab import auth, inference, ranking, workspace
 from biolab import evidence as evidence_service
 
 A2A_PROTOCOL_VERSION = "1.0"
@@ -47,6 +47,7 @@ def agent_card(base_url: str) -> dict[str, Any]:
             "streaming": False,
             "pushNotifications": False,
             "stateTransitionHistory": True,
+            "fileDownload": False,
         },
         "defaultInputModes": ["text/plain", "application/json"],
         "defaultOutputModes": ["application/json"],
@@ -59,6 +60,11 @@ def agent_card(base_url: str) -> dict[str, Any]:
             ),
             "tags": ["scientific-evidence", "provenance", "retrieval"],
             "examples": ["Find evidence about KRAS in pancreatic cancer."],
+        }, {
+            "id": "rank-and-cite",
+            "name": "Rank and cite preserved evidence",
+            "description": "Rank preserved retrievals and extract grounded claims with citation spans.",
+            "tags": ["ranking", "citations", "human-review"],
         }],
     }
 
@@ -146,6 +152,44 @@ def _task(message: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _metadata(params: dict[str, Any], message: dict[str, Any]) -> dict[str, Any]:
+    metadata = params.get("metadata") or message.get("metadata") or {}
+    if not isinstance(metadata, dict):
+        raise TypeError("metadata must be an object")
+    return metadata
+
+
+def _derived_operation(request: Request, metadata: dict[str, Any]) -> dict[str, Any] | None:
+    operation = metadata.get("operation")
+    if operation == "rank":
+        ids = metadata.get("retrieval_ids", [])
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+            raise ValueError("metadata.retrieval_ids must be a list of strings")
+        return ranking.rank_retrievals(
+            request.app.state.conn, str(metadata.get("question", "")), ids,
+            created_by=f"a2a:{auth.current_identity.get()}",
+            project_id=str(metadata["project_id"]) if metadata.get("project_id") else None,
+            requested_limit=int(metadata.get("requested_limit", 5)),
+        )
+    if operation == "grounded_insights":
+        ids = metadata.get("retrieval_ids", [])
+        if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
+            raise ValueError("metadata.retrieval_ids must be a list of strings")
+        return inference.create_inference(
+            request.app.state.conn, str(metadata.get("question", "")), ids,
+            created_by=f"a2a:{auth.current_identity.get()}",
+            project_id=str(metadata["project_id"]) if metadata.get("project_id") else None,
+            ranking_run_id=str(metadata["ranking_run_id"]) if metadata.get("ranking_run_id") else None,
+            max_insights=int(metadata.get("max_insights", 10)),
+        )
+    if operation == "project_report":
+        report = workspace.get_project_report(request.app.state.conn, str(metadata.get("project_id", "")))
+        if report is None:
+            raise ValueError("project not found")
+        return report
+    return None
+
+
 async def agent_card_endpoint(request: Request) -> JSONResponse:
     base_url = f"{request.url.scheme}://{request.url.netloc}"
     return JSONResponse(agent_card(base_url))
@@ -186,14 +230,15 @@ async def rpc_endpoint(request: Request) -> JSONResponse:  # noqa: PLR0911 - JSO
         return _rpc_error(request_id, -32602, "message.parts must contain text")
 
     try:
-        sources, max_results = _search_options(params, message)
-        result = evidence_service.search_evidence(
-            request.app.state.conn,
-            query=query,
-            agent_id=f"a2a:{auth.current_identity.get()}",
-            sources=sources,
-            max_results=max_results,
-        )
+        metadata = _metadata(params, message)
+        result = _derived_operation(request, metadata)
+        if result is None:
+            sources, max_results = _search_options(params, message)
+            result = evidence_service.search_evidence(
+                request.app.state.conn, query=query,
+                agent_id=f"a2a:{auth.current_identity.get()}",
+                sources=sources, max_results=max_results,
+            )
     except (TypeError, ValueError) as exc:
         return _rpc_error(request_id, -32602, str(exc))
     except Exception as exc:  # noqa: BLE001 - convert connector failures to task errors

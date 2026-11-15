@@ -73,3 +73,24 @@ def test_a2a_invalid_task_and_method(tmp_path):
 
     assert missing.json()["error"]["code"] == -32001
     assert unknown.json()["error"]["code"] == -32601
+
+
+def test_a2a_rank_operation_uses_shared_ranking_service(tmp_path):
+    from biolab import retrieval_log
+
+    app = create_app(tmp_path / "a2a-rank.db")
+    with TestClient(app) as client:
+        record = retrieval_log.write_retrieval(
+            app.state.conn, "KRAS", "1", "test", "pubmed", {}, "raw",
+            {"title": "KRAS paper", "abstract": "KRAS"},
+        )
+        response = client.post(
+            "/a2a",
+            json={"jsonrpc": "2.0", "id": 1, "method": "message/send", "params": {
+                "message": {"role": "ROLE_USER", "parts": [{"text": "rank this"}]},
+                "metadata": {"operation": "rank", "question": "KRAS", "retrieval_ids": [record.retrieval_id]},
+            }},
+        )
+    artifact = response.json()["result"]["task"]["artifacts"][0]["parts"][0]["data"]
+    assert response.status_code == 200
+    assert artifact["candidates"][0]["retrieval_id"] == record.retrieval_id

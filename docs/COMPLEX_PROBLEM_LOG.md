@@ -368,6 +368,35 @@ The parser is not an LLM and does not infer unsupported conclusions. A future
 model-backed summarizer must consume these citations and remain a separate,
 reviewable layer.
 
+## 2026-11-15 — Server-side exports and cross-surface contracts
+
+### Problem
+
+Project reports had JSON/Markdown paths but no deterministic PDF artifact, and
+A2A could search only while REST and MCP could rank and parse.
+
+### Solution
+
+Added a bounded dependency-free PDF renderer with SHA-256 export records. The
+Agent Card now advertises the file-download limitation explicitly, while A2A
+`message/send` dispatches `rank`, `grounded_insights`, and `project_report`
+operations through the same service functions used by REST and MCP. Project
+records now carry owner and organization identifiers, and REST project listing
+and reporting enforce the request identity.
+
+### Verification
+
+- PDF response starts with `%PDF-1.4` and is recorded with a checksum.
+- A2A ranking contract test returns the same retrieval ID as the shared ranking
+  service.
+- Full offline suite: `116 passed, 28 deselected`; Ruff and MyPy pass.
+
+### Boundary preserved
+
+The PDF renderer is intentionally text-focused. Durable multi-user hosting
+still requires `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, authenticated API keys,
+and organization-specific operational controls.
+
 ## Entry template
 
 Use this shape for future complex problems:

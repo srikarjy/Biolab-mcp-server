@@ -36,6 +36,11 @@ it does not validate scientific conclusions or provide clinical advice.
 - Citation-safe grounded extraction from preserved titles and abstracts, with
   stored parser chunks, exact citation spans, excerpt hashes, inspectable
   inference runs, and an explicit flush operation for temporary parser data.
+- Server-side JSON/Markdown/PDF report exports with SHA-256 checksums and export
+  records, plus A2A dispatch for ranking, grounded insights, and project reports.
+- Project owner and organization-member schema with service-layer project
+  listing/report checks; hosted multi-organization deployment still requires
+  authenticated keys and durable Turso storage.
 - Offline demo, integrity verification, package metadata, and test coverage.
 
 ## Architecture boundaries

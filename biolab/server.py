@@ -1,5 +1,6 @@
 """MCP, REST, and dashboard server for the Biolab evidence workspace."""
 
+import base64
 import json
 import os
 
@@ -16,6 +17,7 @@ from biolab import (
     db,
     europepmc_client,
     executions,
+    exports,
     inference,
     pubmed_client,
     ranking,
@@ -338,6 +340,32 @@ def get_project_report(project_id: str) -> dict:
     if result is None:
         raise ValueError("project not found")
     return result
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def export_project_report(project_id: str, format: str = "markdown") -> dict:
+    """Render a project report as JSON, Markdown, or base64-encoded PDF."""
+    report = workspace.get_project_report(_conn, project_id)
+    if report is None:
+        raise ValueError("project not found")
+    if format == "json":
+        content = json.dumps(report, indent=2, sort_keys=True).encode()
+        media_type = "application/json"
+    elif format == "markdown":
+        content = workspace.render_project_markdown(report).encode()
+        media_type = "text/markdown"
+    elif format == "pdf":
+        content = exports.markdown_to_pdf(workspace.render_project_markdown(report))
+        media_type = "application/pdf"
+    else:
+        raise ValueError("format must be json, markdown, or pdf")
+    record = exports.record_export(_conn, project_id, format, content, "mcp")
+    return {
+        "export": record,
+        "media_type": media_type,
+        "content_utf8": content.decode("utf-8", "replace") if format != "pdf" else None,
+        "content_base64": base64.b64encode(content).decode() if format == "pdf" else None,
+    }
 
 
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)

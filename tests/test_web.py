@@ -272,8 +272,13 @@ def test_project_report_api_supports_json_and_markdown(tmp_path):
         markdown_report = client.get(
             f"/v1/projects/{project['project_id']}/report?format=markdown"
         )
+        pdf_report = client.get(
+            f"/v1/projects/{project['project_id']}/report?format=pdf"
+        )
 
     assert json_report.status_code == 200
     assert json_report.json()["project"]["name"] == "Report"
     assert markdown_report.status_code == 200
     assert markdown_report.text.startswith("# Report")
+    assert pdf_report.status_code == 200
+    assert pdf_report.content.startswith(b"%PDF-1.4")

@@ -1,5 +1,6 @@
 """Scientist projects, evidence collections, and saved evidence watches."""
 
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
@@ -16,7 +17,11 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def create_project(conn: Any, name: str, description: str = "") -> dict:
+def _organization_id(owner_id: str) -> str:
+    return "org_" + hashlib.sha256(owner_id.encode("utf-8")).hexdigest()[:24]
+
+
+def create_project(conn: Any, name: str, description: str = "", owner_id: str = "local") -> dict:
     if not name.strip():
         raise ValueError("project name must not be empty")
     project = {
@@ -24,30 +29,60 @@ def create_project(conn: Any, name: str, description: str = "") -> dict:
         "name": name.strip(),
         "description": description.strip(),
         "created_at": _now(),
+        "owner_id": owner_id,
+        "organization_id": _organization_id(owner_id),
     }
+    organization_id = project["organization_id"]
     conn.execute(
-        "INSERT INTO projects (project_id, name, description, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO organizations (organization_id, name, created_by, created_at) VALUES (?, ?, ?, ?)",
+        (organization_id, f"{owner_id} workspace", owner_id, project["created_at"]),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO organization_members (organization_id, member_id, role, created_at) VALUES (?, ?, ?, ?)",
+        (organization_id, owner_id, "owner", project["created_at"]),
+    )
+    conn.execute(
+        "INSERT INTO projects (project_id, name, description, created_at, owner_id, organization_id) VALUES (?, ?, ?, ?, ?, ?)",
         tuple(project.values()),
     )
     conn.commit()
     return project
 
 
-def list_projects(conn: Any) -> list[dict]:
+def list_projects(conn: Any, owner_id: str | None = None) -> list[dict]:
+    where = "WHERE owner_id = ?" if owner_id else ""
+    params = (owner_id,) if owner_id else ()
     rows = conn.execute(
-        "SELECT project_id, name, description, created_at FROM projects ORDER BY created_at DESC"
+        f"SELECT project_id, name, description, created_at, owner_id, organization_id FROM projects {where} ORDER BY created_at DESC",
+        params,
     ).fetchall()
     return [
-        {"project_id": row[0], "name": row[1], "description": row[2], "created_at": row[3]}
+        {"project_id": row[0], "name": row[1], "description": row[2], "created_at": row[3], "owner_id": row[4], "organization_id": row[5]}
         for row in rows
     ]
 
 
-def create_collection(conn: Any, project_id: str, name: str, description: str = "") -> dict:
+def has_project_access(conn: Any, project_id: str, owner_id: str) -> bool:
+    row = conn.execute(
+        "SELECT owner_id, organization_id FROM projects WHERE project_id = ?", (project_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    if row[0] == owner_id:
+        return True
+    return conn.execute(
+        "SELECT 1 FROM organization_members WHERE organization_id = ? AND member_id = ?",
+        (row[1], owner_id),
+    ).fetchone() is not None
+
+
+def create_collection(conn: Any, project_id: str, name: str, description: str = "", owner_id: str | None = None) -> dict:
     if not name.strip():
         raise ValueError("collection name must not be empty")
     if conn.execute("SELECT 1 FROM projects WHERE project_id = ?", (project_id,)).fetchone() is None:
         raise ValueError("project not found")
+    if owner_id is not None and not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
     collection = {
         "collection_id": str(uuid.uuid4()),
         "project_id": project_id,
@@ -396,9 +431,11 @@ def trace_claim(conn: Any, claim_id: str) -> dict | None:
     }
 
 
-def get_project_report(conn: Any, project_id: str) -> dict | None:
+def get_project_report(conn: Any, project_id: str, owner_id: str | None = None) -> dict | None:
+    if owner_id is not None and not has_project_access(conn, project_id, owner_id):
+        return None
     project_row = conn.execute(
-        "SELECT project_id, name, description, created_at FROM projects WHERE project_id = ?",
+        "SELECT project_id, name, description, created_at, owner_id, organization_id FROM projects WHERE project_id = ?",
         (project_id,),
     ).fetchone()
     if project_row is None:
@@ -419,6 +456,7 @@ def get_project_report(conn: Any, project_id: str) -> dict | None:
         "project": {
             "project_id": project_row[0], "name": project_row[1],
             "description": project_row[2], "created_at": project_row[3],
+            "owner_id": project_row[4], "organization_id": project_row[5],
         },
         "collections": [get_collection(conn, row[0]) for row in collection_ids],
         "claims": [trace_claim(conn, row[0]) for row in claim_ids],
