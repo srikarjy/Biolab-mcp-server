@@ -53,11 +53,14 @@ def test_parsed_documents_live_inside_project_folder_and_download(monkeypatch, t
         })
         run_id = parsed.json()["parser_run_id"]
         folder = client.get(f"/v1/projects/{project['project_id']}/parser-runs")
+        rag_search = client.post(f"/v1/projects/{project['project_id']}/rag/search", json={"question": "stored evidence"})
         download = client.get(f"/v1/parser/runs/{run_id}/download")
     assert parsed.status_code == 201
     assert parsed.json()["project_id"] == project["project_id"]
     assert folder.status_code == 200
     assert folder.json()["parser_runs"][0]["parser_run_id"] == run_id
+    assert rag_search.status_code == 200
+    assert rag_search.json()["status"] == "disabled"
     assert download.status_code == 200
     assert download.headers["content-disposition"].endswith('"paper.parsed.json"')
     assert download.json()["blocks"][0]["text"] == "Stored evidence"

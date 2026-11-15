@@ -22,6 +22,7 @@ from biolab import (
     evidence,
     exports,
     inference,
+    rag,
     ranking,
     retrieval_log,
     workspace,
@@ -46,6 +47,7 @@ OPENAPI_SCHEMA = {
         "/v1/inferences/{inference_run_id}/flush": {"post": {"summary": "Flush disposable parser chunks"}},
         "/v1/parser/parse": {"post": {"summary": "Parse a PDF through the configured Hugging Face parser"}},
         "/v1/projects/{project_id}/parser-runs": {"get": {"summary": "List parsed documents in a project folder"}},
+        "/v1/projects/{project_id}/rag/search": {"post": {"summary": "Search project-scoped parsed RAG chunks"}},
         "/v1/parser/runs/{parser_run_id}": {"get": {"summary": "Inspect parsed document blocks"}},
         "/v1/parser/runs/{parser_run_id}/flush": {"post": {"summary": "Flush parsed document blocks"}},
         "/v1/parser/runs/{parser_run_id}/download": {"get": {"summary": "Download parsed document JSON"}},
@@ -705,6 +707,20 @@ async def project_parser_runs(request: Request) -> JSONResponse:
     return JSONResponse({"parser_runs": result})
 
 
+async def project_rag_search(request: Request) -> JSONResponse:
+    project_id = request.path_params["project_id"]
+    if not workspace.has_project_access(request.app.state.conn, project_id, auth.request_identity(request)):
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    try:
+        payload = await request.json()
+        result = rag.search_parser_context(project_id, str(payload.get("question", "")), int(payload.get("top_k", 8)))
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    return JSONResponse(result)
+
+
 async def parser_download(request: Request) -> Response:
     try:
         result = document_parser.assert_run_access(request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request))
@@ -978,6 +994,7 @@ def api_routes() -> list[Route]:
         Route("/v1/inferences/{inference_run_id}/flush", inference_flush, methods=["POST"]),
         Route("/v1/parser/parse", parser_parse, methods=["POST"]),
         Route("/v1/projects/{project_id}/parser-runs", project_parser_runs),
+        Route("/v1/projects/{project_id}/rag/search", project_rag_search, methods=["POST"]),
         Route("/v1/parser/runs/{parser_run_id}", parser_detail),
         Route("/v1/parser/runs/{parser_run_id}/flush", parser_flush, methods=["POST"]),
         Route("/v1/parser/runs/{parser_run_id}/download", parser_download),

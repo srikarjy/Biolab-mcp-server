@@ -260,14 +260,14 @@ CREATE TABLE IF NOT EXISTS exports (
 CREATE INDEX IF NOT EXISTS idx_exports_project ON exports(project_id, created_at);
 
 CREATE TABLE IF NOT EXISTS parser_runs (
-    parser_run_id TEXT PRIMARY KEY, project_id TEXT, filename TEXT NOT NULL, parser_model TEXT NOT NULL,
+    parser_run_id TEXT PRIMARY KEY, project_id TEXT, document_id TEXT, filename TEXT NOT NULL, parser_model TEXT NOT NULL,
     source_hash TEXT NOT NULL, status TEXT NOT NULL, block_count INTEGER NOT NULL,
     created_by TEXT NOT NULL, created_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(project_id)
 );
 CREATE TABLE IF NOT EXISTS parsed_blocks (
     block_id TEXT PRIMARY KEY, parser_run_id TEXT NOT NULL, page_number INTEGER NOT NULL,
-    block_index INTEGER NOT NULL, block_type TEXT NOT NULL, text TEXT NOT NULL,
+    block_index INTEGER NOT NULL, block_type TEXT NOT NULL, section_name TEXT NOT NULL DEFAULT 'unknown', text TEXT NOT NULL,
     bbox TEXT, content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
     FOREIGN KEY (parser_run_id) REFERENCES parser_runs(parser_run_id)
 );
@@ -339,6 +339,11 @@ def _upgrade_parser_runs(conn: Any) -> None:
     columns = {row[1] for row in conn.execute("PRAGMA table_info(parser_runs)").fetchall()}
     if "project_id" not in columns:
         conn.execute("ALTER TABLE parser_runs ADD COLUMN project_id TEXT")
+    if "document_id" not in columns:
+        conn.execute("ALTER TABLE parser_runs ADD COLUMN document_id TEXT")
+    block_columns = {row[1] for row in conn.execute("PRAGMA table_info(parsed_blocks)").fetchall()}
+    if "section_name" not in block_columns:
+        conn.execute("ALTER TABLE parsed_blocks ADD COLUMN section_name TEXT NOT NULL DEFAULT 'unknown'")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_parser_runs_project ON parser_runs(project_id, created_at)")
 
 
