@@ -302,6 +302,41 @@ tools so all delivery surfaces can use the same ranking service.
 The score means query-fit triage only. It does not establish paper quality,
 scientific truth, clinical validity, or replace scientist review.
 
+## 2026-11-15 — Connect ranking to the scientist review queue
+
+### Problem
+
+The ranking service returned explanations, but a scientist could not inspect
+the top candidates or record a review decision from the hosted dashboard.
+
+### Investigation
+
+The live dashboard was exercised after a preserved UniProt search. The ranking
+run and score components were returned correctly. A response-contract gap was
+found because the create response did not include the persisted candidate rank
+or candidate ID needed by the review action.
+
+### Solution
+
+The dashboard now automatically ranks the preserved search results, renders a
+top-five review queue with score components, reason codes, matched terms, and
+missing facets, and supports accepted, rejected, and conflicting decisions.
+The ranking response now includes `rank` and `ranking_candidate_id`. REST and
+MCP expose the same review operation.
+
+### Verification
+
+- Full offline suite: `111 passed, 28 deselected`.
+- Ruff and MyPy pass.
+- Live search returned a preserved retrieval.
+- Live ranking returned `rank: 1` and a reviewable candidate ID.
+- Live review recorded `review_state: rejected` with a reviewer note.
+
+### Boundary preserved
+
+The review queue records a scientist or agent decision; it does not convert a
+ranking into a scientific conclusion or clinical recommendation.
+
 ## Entry template
 
 Use this shape for future complex problems:

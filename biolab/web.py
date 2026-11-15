@@ -28,6 +28,7 @@ OPENAPI_SCHEMA = {
         "/v1/evidence/search": {"post": {"summary": "Search and preserve evidence"}},
         "/v1/rankings": {"post": {"summary": "Rank preserved retrievals with explanations"}},
         "/v1/rankings/{ranking_run_id}": {"get": {"summary": "Get a ranking run"}},
+        "/v1/rankings/{ranking_run_id}/candidates/{ranking_candidate_id}/review": {"post": {"summary": "Review a ranked candidate"}},
         "/v1/retrievals/{retrieval_id}": {"get": {"summary": "Fetch a preserved retrieval"}},
         "/v1/verify": {"get": {"summary": "Verify the audit hash chain"}},
         "/v1/projects": {
@@ -123,6 +124,18 @@ DASHBOARD_HTML = r"""<!doctype html>
     .record-id { color: var(--muted); font-size: .69rem; }
     .evidence-card p { margin: 0 0 12px; color: #5b7077; font-size: .8rem; line-height: 1.5; }
     .evidence-card a { color: var(--teal-dark); font-size: .8rem; font-weight: 800; text-decoration: none; }
+    .ranking-section { margin-top: 26px; padding-top: 26px; border-top: 1px solid var(--line); }
+    .ranking-cards { display: grid; gap: 12px; }
+    .ranking-card { padding: 17px; border: 1px solid #cfe2d7; border-radius: 16px; background: #fbfefc; }
+    .ranking-card .card-meta { margin-bottom: 10px; }
+    .rank-score { color: var(--teal-dark); font-size: .78rem; font-weight: 850; }
+    .score-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin: 12px 0; }
+    .score-cell { padding: 7px; border-radius: 8px; color: #536970; background: #f0f7f2; font-size: .66rem; }
+    .score-cell strong { display: block; color: var(--ink); font-size: .76rem; }
+    .reason-line { margin: 9px 0; color: #536970; font-size: .76rem; line-height: 1.45; }
+    .review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; }
+    .review-actions button { min-height: 34px; padding: .45rem .65rem; font-size: .7rem; }
+    .review-status { color: var(--teal-dark); font-size: .72rem; font-weight: 800; }
     .empty { grid-column: 1 / -1; padding: 28px; border: 1px dashed #bfd4cb; border-radius: 17px; color: var(--muted); background: #fbfdfb; text-align: center; }
     code { overflow-wrap: anywhere; }
     .muted { color: var(--muted); }
@@ -196,12 +209,19 @@ DASHBOARD_HTML = r"""<!doctype html>
     <section class="results-section" aria-labelledby="evidence-title">
       <div class="results-head"><div><p class="eyebrow">Evidence ledger</p><h2 id="evidence-title">Preserved results</h2><p id="summary" class="summary">Ready for your first evidence pass.</p></div><span class="badge">Step 02 / inspect</span></div>
       <div id="results" class="cards"><div class="empty">Your evidence ledger is empty. Run a focused search to create the first preserved record.</div></div>
+      <section id="ranking-section" class="ranking-section" hidden aria-labelledby="ranking-title">
+        <div class="results-head"><div><p class="eyebrow">Review queue</p><h2 id="ranking-title">Top-ranked papers</h2><p id="ranking-summary" class="summary">Ranking preserved results…</p></div><span class="badge">Step 03 / review</span></div>
+        <div id="ranking-results" class="ranking-cards"></div>
+      </section>
     </section>
   </main>
   <script>
     const form = document.querySelector('#search-form');
     const summary = document.querySelector('#summary');
     const results = document.querySelector('#results');
+    const rankingSection = document.querySelector('#ranking-section');
+    const rankingSummary = document.querySelector('#ranking-summary');
+    const rankingResults = document.querySelector('#ranking-results');
     const apiBase = window.location.pathname.startsWith('/api') ? '/api' : '';
     const apiFetch = (url, options = {}) => {
       const key = document.querySelector('#api-key').value.trim();
@@ -216,6 +236,52 @@ DASHBOARD_HTML = r"""<!doctype html>
       const id = String(value ?? '');
       return id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-6)}` : id;
     };
+    const scoreLabel = (name) => name.replaceAll('_', ' ');
+    function renderRanking(run, records) {
+      const byId = Object.fromEntries(records.map(record => [record.retrieval_id, record]));
+      rankingSummary.textContent = `${run.candidate_count} papers ranked with ${run.algorithm_version}`;
+      rankingResults.innerHTML = run.candidates.map(candidate => {
+        const record = byId[candidate.retrieval_id] || {};
+        const snap = record.snapshot || {};
+        const title = snap.title || snap.name || snap.primary_accession || candidate.external_id;
+        const components = Object.entries(candidate.score_components).map(([name, value]) =>
+          `<span class="score-cell">${escapeHtml(scoreLabel(name))}<strong>${(Number(value) * 100).toFixed(0)}%</strong></span>`).join('');
+        const reasons = candidate.reason_codes.map(reason => escapeHtml(reason.replaceAll('_', ' '))).join(', ') || 'No explanation codes';
+        const matched = candidate.matched_terms.length ? candidate.matched_terms.map(escapeHtml).join(', ') : 'None recorded';
+        const missing = candidate.missing_facets.length ? candidate.missing_facets.map(escapeHtml).join(', ') : 'None';
+        return `<article class="ranking-card" data-candidate-id="${escapeHtml(candidate.ranking_candidate_id)}">
+          <div class="card-meta"><span class="badge">Rank ${candidate.rank}</span><span class="rank-score">${(Number(candidate.score_total) * 100).toFixed(1)}% fit</span></div>
+          <h3>${escapeHtml(title)}</h3>
+          <p class="reason-line"><strong>Why:</strong> ${reasons}</p>
+          <div class="score-grid">${components}</div>
+          <p class="reason-line"><strong>Matched:</strong> ${matched}<br><strong>Missing:</strong> ${missing}<br><strong>Source:</strong> ${escapeHtml(record.source || candidate.source)} · ${escapeHtml(candidate.external_id)}</p>
+          <div class="review-actions" data-run-id="${escapeHtml(run.ranking_run_id)}">
+            <button class="secondary" type="button" data-review-state="accepted">Accept</button>
+            <button class="secondary" type="button" data-review-state="rejected">Reject</button>
+            <button class="secondary" type="button" data-review-state="conflicting">Conflicting</button>
+            <span class="review-status">Unreviewed</span>
+          </div>
+        </article>`;
+      }).join('') || '<div class="empty">No candidates were available to rank.</div>';
+    }
+    rankingResults.addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-review-state]');
+      if (!button) return;
+      const card = button.closest('[data-candidate-id]');
+      const actions = button.closest('[data-run-id]');
+      const status = actions.querySelector('.review-status');
+      button.disabled = true;
+      try {
+        const response = await apiFetch(`/v1/rankings/${encodeURIComponent(actions.dataset.runId)}/candidates/${encodeURIComponent(card.dataset.candidateId)}/review`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({review_state: button.dataset.reviewState, reviewed_by: 'web:local'})
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Review returned ${response.status}`);
+        status.textContent = `Marked ${result.review_state}`;
+      } catch (error) { status.textContent = String(error); }
+      finally { button.disabled = false; }
+    });
     async function verify() {
       const audit = document.querySelector('#audit');
       const button = document.querySelector('#verify');
@@ -288,6 +354,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       document.querySelector('#search-label').textContent = 'Searching sources…';
       summary.textContent = 'Searching sources and preserving returned records…';
       results.innerHTML = '';
+      rankingSection.hidden = true;
+      rankingResults.innerHTML = '';
       const payload = {
         query: document.querySelector('#query').value,
         sources: document.querySelector('#sources').value.split(',').map(x => x.trim()).filter(Boolean),
@@ -312,9 +380,21 @@ DASHBOARD_HTML = r"""<!doctype html>
             <h3>${escapeHtml(title)}</h3><p>Preserved retrieval <code>${escapeHtml(record.retrieval_id)}</code></p>
             ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Open source ↗</a>` : ''}</article>`;
         }).join('') || '<div class="empty">No records returned. Check the source selection or broaden the question.</div>';
+        if (records.length) {
+          rankingSection.hidden = false;
+          rankingSummary.textContent = 'Ranking preserved results…';
+          const rankingResponse = await apiFetch('/v1/rankings', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({question: payload.query, retrieval_ids: records.map(record => record.retrieval_id), requested_limit: 5, created_by: 'web:local'})
+          });
+          const rankingResult = await rankingResponse.json();
+          if (!rankingResponse.ok) throw new Error(rankingResult.error || `Ranking returned ${rankingResponse.status}`);
+          renderRanking(rankingResult, records);
+        }
       } catch (error) {
         summary.textContent = 'Search failed. The source error is preserved in the API response when available.';
         results.innerHTML = `<div class="empty">${escapeHtml(error)}</div>`;
+        rankingSection.hidden = true;
       } finally { button.disabled = false; document.querySelector('#search-label').textContent = 'Search and preserve evidence'; }
     });
     verify(); loadProjects();
@@ -420,6 +500,22 @@ async def ranking_detail(request: Request) -> JSONResponse:
     )
     if result is None:
         return JSONResponse({"error": "ranking run not found"}, status_code=404)
+    return JSONResponse(result)
+
+
+async def ranking_review(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        result = ranking.review_candidate(
+            request.app.state.conn,
+            request.path_params["ranking_run_id"],
+            request.path_params["ranking_candidate_id"],
+            review_state=str(payload.get("review_state", "")),
+            reviewed_by=auth.bind_agent_id(str(payload.get("reviewed_by", "api:review")), request),
+            review_note=str(payload.get("review_note", "")),
+        )
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(result)
 
 
@@ -627,6 +723,7 @@ def api_routes() -> list[Route]:
         Route("/v1/evidence/search", search, methods=["POST"]),
         Route("/v1/rankings", rankings, methods=["POST"]),
         Route("/v1/rankings/{ranking_run_id}", ranking_detail),
+        Route("/v1/rankings/{ranking_run_id}/candidates/{ranking_candidate_id}/review", ranking_review, methods=["POST"]),
         Route("/v1/retrievals/{retrieval_id}", get_retrieval),
         Route("/v1/verify", verify),
         Route("/v1/projects", projects, methods=["GET", "POST"]),

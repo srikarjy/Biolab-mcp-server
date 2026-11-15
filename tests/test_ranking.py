@@ -61,6 +61,7 @@ def test_rank_retrievals_persists_top_five_and_is_deterministic(tmp_path):
     assert [item["external_id"] for item in first["candidates"]] == ["high", "medium", "low"]
     assert [item["external_id"] for item in first["candidates"]] == [item["external_id"] for item in second["candidates"]]
     stored = ranking.get_ranking(conn, first["ranking_run_id"])
+    assert first["candidates"][0]["rank"] == 1
     assert stored["candidates"][0]["rank"] == 1
     assert stored["candidates"][0]["review_state"] == "unreviewed"
 
@@ -69,3 +70,16 @@ def test_rank_rejects_unknown_retrieval(tmp_path):
     conn = db.connect(str(tmp_path / "ranking.db"))
     with pytest.raises(ValueError, match="retrievals not found"):
         ranking.rank_retrievals(conn, "question", ["missing"], created_by="scientist")
+
+
+def test_review_candidate_persists_decision(tmp_path):
+    conn = db.connect(str(tmp_path / "ranking.db"))
+    record = _retrieval(conn, "paper", {"title": "KRAS paper", "abstract": "KRAS"})
+    run = ranking.rank_retrievals(conn, "KRAS", [record.retrieval_id], created_by="scientist")
+    candidate = ranking.get_ranking(conn, run["ranking_run_id"])["candidates"][0]
+    reviewed = ranking.review_candidate(
+        conn, run["ranking_run_id"], candidate["ranking_candidate_id"],
+        review_state="accepted", reviewed_by="scientist", review_note="Directly relevant",
+    )
+    assert reviewed["review_state"] == "accepted"
+    assert ranking.get_ranking(conn, run["ranking_run_id"])["candidates"][0]["review_note"] == "Directly relevant"

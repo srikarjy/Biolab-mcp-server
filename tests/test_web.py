@@ -91,6 +91,25 @@ def test_ranking_api_returns_explanations_and_persists_run(tmp_path):
     assert fetched.json()["candidates"][0]["review_state"] == "unreviewed"
 
 
+def test_ranking_review_api_updates_candidate(tmp_path):
+    app = create_app(tmp_path / "ranking-review.db")
+    with TestClient(app) as client:
+        record = retrieval_log.write_retrieval(
+            app.state.conn, "KRAS", "1", "test", "pubmed", {}, "raw",
+            {"title": "KRAS paper", "abstract": "KRAS"},
+        )
+        run = client.post(
+            "/v1/rankings", json={"question": "KRAS", "retrieval_ids": [record.retrieval_id]}
+        ).json()
+        candidate = run["candidates"][0]
+        response = client.post(
+            f"/v1/rankings/{run['ranking_run_id']}/candidates/{candidate['ranking_candidate_id']}/review",
+            json={"review_state": "accepted", "reviewed_by": "scientist", "review_note": "Relevant"},
+        )
+    assert response.status_code == 200
+    assert response.json()["review_state"] == "accepted"
+
+
 def test_bad_request_and_missing_retrieval(tmp_path):
     with TestClient(create_app(tmp_path / "web.db")) as client:
         bad = client.post("/v1/evidence/search", json={"query": "", "max_results": 0})

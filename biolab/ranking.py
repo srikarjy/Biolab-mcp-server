@@ -229,12 +229,14 @@ def rank_retrievals(
          ALGORITHM_VERSION, requested_limit, as_of_dt.isoformat(), created_by.strip(), created_at, _now()),
     )
     for rank, candidate in enumerate(selected, start=1):
+        candidate["rank"] = rank
+        candidate["ranking_candidate_id"] = str(uuid.uuid4())
         conn.execute(
             """INSERT INTO ranking_candidates
                (ranking_candidate_id, ranking_run_id, retrieval_id, rank, score_total,
                 score_components, reason_codes, matched_terms, missing_facets)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (str(uuid.uuid4()), run_id, candidate["retrieval_id"], rank, candidate["score_total"],
+            (candidate["ranking_candidate_id"], run_id, candidate["retrieval_id"], rank, candidate["score_total"],
              json.dumps(candidate["score_components"], sort_keys=True), json.dumps(candidate["reason_codes"]),
              json.dumps(candidate["matched_terms"]), json.dumps(candidate["missing_facets"])),
         )
@@ -267,4 +269,46 @@ def get_ranking(conn: Any, ranking_run_id: str) -> dict[str, Any] | None:
             "missing_facets": json.loads(item[7]), "review_state": item[8],
             "review_note": item[9], "reviewed_by": item[10], "reviewed_at": item[11],
         } for item in candidates],
+    }
+
+
+def review_candidate(
+    conn: Any,
+    ranking_run_id: str,
+    ranking_candidate_id: str,
+    *,
+    review_state: str,
+    reviewed_by: str,
+    review_note: str = "",
+) -> dict[str, Any]:
+    """Record a scientist or agent review decision for one ranked candidate."""
+    if review_state not in REVIEW_STATES - {"unreviewed"}:
+        raise ValueError("review_state must be accepted, rejected, or conflicting")
+    if not reviewed_by.strip():
+        raise ValueError("reviewed_by must not be empty")
+    row = conn.execute(
+        """SELECT ranking_candidate_id, ranking_run_id, retrieval_id, rank, score_total,
+                  score_components, reason_codes, matched_terms, missing_facets
+           FROM ranking_candidates
+           WHERE ranking_candidate_id = ? AND ranking_run_id = ?""",
+        (ranking_candidate_id, ranking_run_id),
+    ).fetchone()
+    if row is None:
+        raise ValueError("ranking candidate not found")
+    reviewed_at = _now()
+    conn.execute(
+        """UPDATE ranking_candidates
+           SET review_state = ?, review_note = ?, reviewed_by = ?, reviewed_at = ?
+           WHERE ranking_candidate_id = ? AND ranking_run_id = ?""",
+        (review_state, review_note.strip(), reviewed_by.strip(), reviewed_at,
+         ranking_candidate_id, ranking_run_id),
+    )
+    conn.commit()
+    return {
+        "ranking_candidate_id": row[0], "ranking_run_id": row[1],
+        "retrieval_id": row[2], "rank": row[3], "score_total": row[4],
+        "score_components": json.loads(row[5]), "reason_codes": json.loads(row[6]),
+        "matched_terms": json.loads(row[7]), "missing_facets": json.loads(row[8]),
+        "review_state": review_state, "review_note": review_note.strip(),
+        "reviewed_by": reviewed_by.strip(), "reviewed_at": reviewed_at,
     }

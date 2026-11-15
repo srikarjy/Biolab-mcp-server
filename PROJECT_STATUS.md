@@ -30,6 +30,9 @@ it does not validate scientific conclusions or provide clinical advice.
 - Deterministic ranking v1 for preserved retrievals, including stored score
   components, matched terms, missing facets, reason codes, REST routes, and MCP
   tools. Ranking is query-fit evidence triage, not scientific validation.
+- Dashboard review queue for automatically ranked results, with top-five score
+  explanations and accepted/rejected/conflicting review decisions persisted by
+  ranking candidate ID.
 - Offline demo, integrity verification, package metadata, and test coverage.
 
 ## Architecture boundaries

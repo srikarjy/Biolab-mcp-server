@@ -131,6 +131,21 @@ def get_ranking(ranking_run_id: str) -> dict:
     return result
 
 
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def review_ranked_candidate(
+    ranking_run_id: str,
+    ranking_candidate_id: str,
+    review_state: str,
+    reviewed_by: str,
+    review_note: str = "",
+) -> dict:
+    """Record accepted, rejected, or conflicting scientist review for a candidate."""
+    return ranking.review_candidate(
+        _conn, ranking_run_id, ranking_candidate_id,
+        review_state=review_state, reviewed_by=reviewed_by, review_note=review_note,
+    )
+
+
 @mcp.tool(name="search", annotations=SEARCH_ANNOTATIONS)
 def plugin_search(query: str, ctx: Context) -> dict:
     """Search all evidence sources for ChatGPT/Codex knowledge compatibility."""
