@@ -147,12 +147,17 @@ def save_reviewed_candidates(
     return {"project_id": project_id, "ranking_run_id": ranking_run_id, "collection_id": collection_id, "saved_retrieval_ids": saved, "saved_count": len(saved)}
 
 
-def list_collections(conn: Any, project_id: str | None = None) -> list[dict]:
-    where = "WHERE project_id = ?" if project_id else ""
-    params = (project_id,) if project_id else ()
+def list_collections(conn: Any, project_id: str | None = None, owner_id: str | None = None) -> list[dict]:
+    where = "WHERE ec.project_id = ?" if project_id else ""
+    params: tuple[str, ...] = (project_id,) if project_id else ()
+    if owner_id:
+        where += " AND " if where else "WHERE "
+        where += "p.owner_id = ?"
+        params += (owner_id,)
     rows = conn.execute(
-        f"""SELECT collection_id, project_id, name, description, created_at
-            FROM evidence_collections {where} ORDER BY created_at""",
+        f"""SELECT ec.collection_id, ec.project_id, ec.name, ec.description, ec.created_at
+            FROM evidence_collections ec JOIN projects p ON p.project_id = ec.project_id
+            {where} ORDER BY ec.created_at""",
         params,
     ).fetchall()
     return [
@@ -243,9 +248,12 @@ def create_watch(
     query_text: str,
     agent_id: str,
     max_results: int = 10,
+    owner_id: str | None = None,
 ) -> dict:
     if conn.execute("SELECT 1 FROM projects WHERE project_id = ?", (project_id,)).fetchone() is None:
         raise ValueError("project not found")
+    if owner_id is not None and not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
     if source not in evidence.SUPPORTED_SOURCES:
         raise ValueError("unsupported watch source")
     if not query_text.strip() or not agent_id.strip() or not 1 <= max_results <= evidence.MAX_RESULTS_CAP:
@@ -280,13 +288,17 @@ def create_watch(
     return watch
 
 
-def list_watches(conn: Any, project_id: str | None = None) -> list[dict]:
-    where = "WHERE project_id = ?" if project_id else ""
-    params = (project_id,) if project_id else ()
+def list_watches(conn: Any, project_id: str | None = None, owner_id: str | None = None) -> list[dict]:
+    where = "WHERE ew.project_id = ?" if project_id else ""
+    params: tuple[str, ...] = (project_id,) if project_id else ()
+    if owner_id:
+        where += " AND " if where else "WHERE "
+        where += "p.owner_id = ?"
+        params += (owner_id,)
     rows = conn.execute(
-        f"""SELECT watch_id, project_id, source, query_text, agent_id, max_results,
-                   active, created_at, last_checked_at
-            FROM evidence_watches {where} ORDER BY created_at""",
+        f"""SELECT ew.watch_id, ew.project_id, ew.source, ew.query_text, ew.agent_id, ew.max_results,
+                       ew.active, ew.created_at, ew.last_checked_at
+            FROM evidence_watches ew JOIN projects p ON p.project_id = ew.project_id {where} ORDER BY ew.created_at""",
         params,
     ).fetchall()
     return [
@@ -389,9 +401,11 @@ def list_watch_events(conn: Any, watch_id: str) -> list[dict]:
     ]
 
 
-def create_claim(conn: Any, project_id: str, claim_text: str) -> dict:
+def create_claim(conn: Any, project_id: str, claim_text: str, owner_id: str | None = None) -> dict:
     if conn.execute("SELECT 1 FROM projects WHERE project_id = ?", (project_id,)).fetchone() is None:
         raise ValueError("project not found")
+    if owner_id is not None and not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
     if not claim_text.strip():
         raise ValueError("claim must not be empty")
     claim = {
