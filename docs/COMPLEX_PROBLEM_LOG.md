@@ -428,6 +428,33 @@ pgvector run in this environment. A production acceptance run must configure
 the secrets and independently verify model responses, embedding dimensions,
 database persistence, and flush counts.
 
+## 2026-11-15 — Integrate Hugging Face document parsing
+
+### Problem
+
+DeepSeek should synthesize grounded evidence, but PDF layout/OCR parsing needs
+to happen before chunking so citations can retain page and bounding-box context.
+
+### Solution
+
+Added a Hugging Face parser adapter targeting a configured Inference Endpoint
+or Space wrapper, defaulting to `nvidia/Nemotron-3.5-Parse`. It normalizes
+returned pages/elements into hashed blocks, stores parser runs locally, and
+exposes REST/MCP inspect and flush operations. Parser output remains separate
+from DeepSeek claims and pgvector chunks.
+
+### Verification
+
+- Parser persistence/flush unit test and REST test pass with a mocked HF
+  response contract.
+- Full offline suite: `122 passed, 28 deselected`; Ruff and MyPy pass.
+
+### Boundary preserved
+
+The repository does not claim a live HF model call without `HF_TOKEN` and
+`HF_PARSER_ENDPOINT`. The endpoint wrapper must render PDF pages and return
+page-aware blocks; model output is still untrusted until citation validation.
+
 ## 2026-11-15 — Server-side exports and cross-surface contracts
 
 ### Problem

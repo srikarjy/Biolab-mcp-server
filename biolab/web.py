@@ -4,6 +4,7 @@ This surface deliberately defaults to loopback-only operation. It reuses the
 same evidence and retrieval services as the CLI and MCP server.
 """
 
+import base64
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,7 +14,18 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
-from biolab import a2a, auth, db, evidence, exports, inference, ranking, retrieval_log, workspace
+from biolab import (
+    a2a,
+    auth,
+    db,
+    document_parser,
+    evidence,
+    exports,
+    inference,
+    ranking,
+    retrieval_log,
+    workspace,
+)
 
 OPENAPI_SCHEMA = {
     "openapi": "3.1.0",
@@ -32,6 +44,9 @@ OPENAPI_SCHEMA = {
         "/v1/inferences": {"post": {"summary": "Create citation-safe grounded insights"}},
         "/v1/inferences/{inference_run_id}": {"get": {"summary": "Get grounded insights and citations"}},
         "/v1/inferences/{inference_run_id}/flush": {"post": {"summary": "Flush disposable parser chunks"}},
+        "/v1/parser/parse": {"post": {"summary": "Parse a PDF through the configured Hugging Face parser"}},
+        "/v1/parser/runs/{parser_run_id}": {"get": {"summary": "Inspect parsed document blocks"}},
+        "/v1/parser/runs/{parser_run_id}/flush": {"post": {"summary": "Flush parsed document blocks"}},
         "/v1/retrievals/{retrieval_id}": {"get": {"summary": "Fetch a preserved retrieval"}},
         "/v1/verify": {"get": {"summary": "Verify the audit hash chain"}},
         "/v1/projects": {
@@ -655,6 +670,38 @@ async def inference_flush(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+async def parser_parse(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        encoded = payload.get("content_base64", "")
+        if not isinstance(encoded, str) or not encoded:
+            return JSONResponse({"error": "content_base64 is required"}, status_code=400)
+        result = document_parser.create_parser_run(
+            request.app.state.conn, base64.b64decode(encoded, validate=True),
+            str(payload.get("filename", "document.pdf")), auth.request_identity(request),
+        )
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    return JSONResponse(result, status_code=201)
+
+
+async def parser_detail(request: Request) -> JSONResponse:
+    result = document_parser.get_parser_run(request.app.state.conn, request.path_params["parser_run_id"])
+    if result is None:
+        return JSONResponse({"error": "parser run not found"}, status_code=404)
+    return JSONResponse(result)
+
+
+async def parser_flush(request: Request) -> JSONResponse:
+    try:
+        result = document_parser.flush_parser_run(request.app.state.conn, request.path_params["parser_run_id"])
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    return JSONResponse(result)
+
+
 async def verify(request: Request) -> JSONResponse:
     valid, broken_id = retrieval_log.verify_chain(request.app.state.conn)
     count = request.app.state.conn.execute("SELECT count(*) FROM retrievals").fetchone()[0]
@@ -908,6 +955,9 @@ def api_routes() -> list[Route]:
         Route("/v1/inferences", inferences, methods=["POST"]),
         Route("/v1/inferences/{inference_run_id}", inference_detail),
         Route("/v1/inferences/{inference_run_id}/flush", inference_flush, methods=["POST"]),
+        Route("/v1/parser/parse", parser_parse, methods=["POST"]),
+        Route("/v1/parser/runs/{parser_run_id}", parser_detail),
+        Route("/v1/parser/runs/{parser_run_id}/flush", parser_flush, methods=["POST"]),
         Route("/v1/retrievals/{retrieval_id}", get_retrieval),
         Route("/v1/verify", verify),
         Route("/v1/projects", projects, methods=["GET", "POST"]),

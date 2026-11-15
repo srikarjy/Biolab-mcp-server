@@ -1,5 +1,7 @@
 """Offline acceptance tests for the local dashboard and REST API."""
 
+import base64
+
 from biolab import auth, evidence, retrieval_log
 from biolab.web import create_app
 from starlette.testclient import TestClient
@@ -20,6 +22,20 @@ def test_dashboard_and_health(tmp_path):
     assert metrics.json()["counts"]["retrievals"] == 0
 
 
+def test_huggingface_parser_api_persists_and_flushes(monkeypatch, tmp_path):
+    from biolab import hf_parser
+    monkeypatch.setattr(hf_parser, "parse_document", lambda content, filename: {
+        "parser_model": "nvidia/Nemotron-3.5-Parse", "status": "succeeded", "source_hash": "abc", "block_count": 1,
+        "blocks": [{"block_id": "b1", "page_number": 1, "block_index": 0, "block_type": "paragraph", "text": "Parsed", "bbox": None}],
+    })
+    with TestClient(create_app(tmp_path / "parser-web.db")) as client:
+        created = client.post("/v1/parser/parse", json={"filename": "paper.pdf", "content_base64": base64.b64encode(b"pdf").decode()})
+        run_id = created.json()["parser_run_id"]
+        detail = client.get(f"/v1/parser/runs/{run_id}")
+        flushed = client.post(f"/v1/parser/runs/{run_id}/flush")
+    assert created.status_code == 201
+    assert detail.json()["blocks"][0]["text"] == "Parsed"
+    assert flushed.json()["flushed_parsed_blocks"] == 1
 def test_search_api_uses_shared_service(monkeypatch, tmp_path):
     captured = {}
 

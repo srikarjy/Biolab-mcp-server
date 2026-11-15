@@ -51,6 +51,9 @@ it does not validate scientific conclusions or provide clinical advice.
   wired behind environment configuration, with citation validation rejecting
   unsupported retrieval IDs or source spans. The local extractor remains an
   explicit offline fallback.
+- Hugging Face parser adapter now accepts PDF content, persists page-aware
+  blocks with bounding boxes and hashes, exposes REST/MCP inspection, and
+  flushes disposable parsed blocks separately from claims.
 - Offline demo, integrity verification, package metadata, and test coverage.
 
 ## Architecture boundaries

@@ -254,6 +254,9 @@ GET  /v1/rankings/{ranking_run_id}
 POST /v1/inferences
 GET  /v1/inferences/{inference_run_id}
 POST /v1/inferences/{inference_run_id}/flush
+POST /v1/parser/parse
+GET  /v1/parser/runs/{parser_run_id}
+POST /v1/parser/runs/{parser_run_id}/flush
 GET  /v1/retrievals/{retrieval_id}
 GET  /v1/projects
 POST /v1/projects
@@ -302,7 +305,18 @@ BIOLAB_EMBEDDING_API_URL=https://.../v1/embeddings
 BIOLAB_EMBEDDING_API_KEY=...
 BIOLAB_EMBEDDING_MODEL=text-embedding-3-small
 BIOLAB_EMBEDDING_DIMENSION=1536
+HF_TOKEN=...
+HF_PARSER_ENDPOINT=https://your-inference-endpoint
+HF_PARSER_MODEL=nvidia/Nemotron-3.5-Parse
 ```
+
+Parse a PDF through the Hugging Face backend by sending base64 content to
+`POST /v1/parser/parse`. The response contains page-aware blocks with block
+types, bounding boxes, content hashes, and the selected parser model. Inspect
+it with `GET /v1/parser/runs/{parser_run_id}` and remove disposable parsed
+blocks with `POST /v1/parser/runs/{parser_run_id}/flush`. The parser endpoint
+must be a Hugging Face Inference Endpoint or Space wrapper capable of rendering
+PDF pages for the selected model.
 
 When `DEEPSEEK_API_KEY` is present, inference uses DeepSeek’s structured
 grounded-generation path. When the database and embedding provider are also

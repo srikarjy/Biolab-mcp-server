@@ -15,6 +15,7 @@ from biolab import (
     biorxiv_client,
     clinicaltrials_client,
     db,
+    document_parser,
     europepmc_client,
     executions,
     exports,
@@ -180,6 +181,29 @@ def get_grounded_insights(inference_run_id: str) -> dict:
 def flush_grounded_parser_data(inference_run_id: str) -> dict:
     """Delete temporary parser chunks while preserving claims and citations."""
     return inference.flush_parser_chunks(_conn, inference_run_id)
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def parse_document_with_huggingface(filename: str, content_base64: str, ctx: Context) -> dict:
+    """Parse a PDF through the configured Hugging Face document parser."""
+    return document_parser.create_parser_run(
+        _conn, base64.b64decode(content_base64, validate=True), filename, _bound("mcp:parser", ctx)
+    )
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_parsed_document(parser_run_id: str) -> dict:
+    """Inspect page-aware Hugging Face parser blocks."""
+    result = document_parser.get_parser_run(_conn, parser_run_id)
+    if result is None:
+        raise ValueError("parser run not found")
+    return result
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def flush_parsed_document(parser_run_id: str) -> dict:
+    """Delete temporary parsed blocks while retaining audit claims."""
+    return document_parser.flush_parser_run(_conn, parser_run_id)
 
 
 @mcp.tool(name="search", annotations=SEARCH_ANNOTATIONS)

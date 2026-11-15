@@ -258,6 +258,19 @@ CREATE TABLE IF NOT EXISTS exports (
     FOREIGN KEY (project_id) REFERENCES projects(project_id)
 );
 CREATE INDEX IF NOT EXISTS idx_exports_project ON exports(project_id, created_at);
+
+CREATE TABLE IF NOT EXISTS parser_runs (
+    parser_run_id TEXT PRIMARY KEY, filename TEXT NOT NULL, parser_model TEXT NOT NULL,
+    source_hash TEXT NOT NULL, status TEXT NOT NULL, block_count INTEGER NOT NULL,
+    created_by TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS parsed_blocks (
+    block_id TEXT PRIMARY KEY, parser_run_id TEXT NOT NULL, page_number INTEGER NOT NULL,
+    block_index INTEGER NOT NULL, block_type TEXT NOT NULL, text TEXT NOT NULL,
+    bbox TEXT, content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+    FOREIGN KEY (parser_run_id) REFERENCES parser_runs(parser_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_parsed_blocks_run ON parsed_blocks(parser_run_id, page_number, block_index);
 """
 
 # Tracks the target (Turso URL or local path) most recently connected to, so
