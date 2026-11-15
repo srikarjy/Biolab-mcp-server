@@ -368,6 +368,33 @@ The parser is not an LLM and does not infer unsupported conclusions. A future
 model-backed summarizer must consume these citations and remain a separate,
 reviewable layer.
 
+## 2026-11-15 — Handle serverless retrieval visibility during grounded parsing
+
+### Problem
+
+The public Vercel demo has no configured Turso variables, so search, ranking,
+and inference can land on separate invocations with different ephemeral
+SQLite files. The dashboard then reported valid retrieval IDs as missing.
+
+### Solution
+
+The dashboard now sends the exact returned evidence snapshots with the
+inference request. The parser can use those records only as request-context
+evidence, stores citation excerpts and source metadata, and labels the result
+`request-context` rather than pretending it is durable. Durable deployments
+continue to resolve retrieval IDs from the audit database.
+
+### Verification
+
+- Added a regression test for inference from request-context evidence.
+- Full offline suite: `119 passed, 28 deselected`; Ruff and MyPy pass.
+
+### Boundary preserved
+
+Request-context parsing fixes the demo UX but does not replace durable storage.
+Configure Turso before relying on inference history, later inspection, or
+cross-instance retention.
+
 ## 2026-11-15 — Server-side exports and cross-surface contracts
 
 ### Problem

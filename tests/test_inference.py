@@ -36,3 +36,21 @@ def test_inference_rejects_unknown_retrieval(tmp_path):
     conn = db.connect(str(tmp_path / "inference.db"))
     with pytest.raises(ValueError, match="retrievals not found"):
         inference.create_inference(conn, "KRAS", ["missing"], created_by="scientist")
+
+
+def test_inference_can_use_request_context_evidence_when_storage_is_ephemeral(tmp_path):
+    conn = db.connect(str(tmp_path / "fallback.db"))
+    result = inference.create_inference(
+        conn,
+        "KRAS cancer",
+        ["request-only"],
+        created_by="web:local",
+        evidence_records=[{
+            "retrieval_id": "request-only", "source": "pubmed", "external_id": "1",
+            "snapshot": {"title": "KRAS signal", "abstract": "KRAS is associated with cancer."},
+        }],
+    )
+    assert result["durability"] == "request-context"
+    assert result["insight_count"] == 2
+    stored = inference.get_inference(conn, result["inference_run_id"])
+    assert stored["claims"][0]["citations"][0]["excerpt"] == "KRAS is associated with cancer."

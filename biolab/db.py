@@ -226,6 +226,9 @@ CREATE TABLE IF NOT EXISTS claim_citations (
     span_end          INTEGER NOT NULL,
     excerpt_hash      TEXT NOT NULL,
     locator           TEXT NOT NULL,
+    source            TEXT NOT NULL DEFAULT '',
+    external_id      TEXT NOT NULL DEFAULT '',
+    excerpt_text     TEXT NOT NULL DEFAULT '',
     FOREIGN KEY (claim_id) REFERENCES inference_claims(claim_id),
     FOREIGN KEY (retrieval_id) REFERENCES retrievals(retrieval_id)
 );
@@ -311,6 +314,13 @@ def _upgrade_projects(conn: Any) -> None:
         conn.execute("ALTER TABLE projects ADD COLUMN organization_id TEXT")
 
 
+def _upgrade_citations(conn: Any) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(claim_citations)").fetchall()}
+    for name in ("source", "external_id", "excerpt_text"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE claim_citations ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+
+
 def connect(db_path: str) -> Any:
     global _current_target
     target, token = resolve_target(db_path)
@@ -319,6 +329,7 @@ def connect(db_path: str) -> Any:
     conn.executescript(SCHEMA_V2)
     _upgrade_retrievals(conn)
     _upgrade_projects(conn)
+    _upgrade_citations(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_org ON projects(organization_id)")
     conn.commit()

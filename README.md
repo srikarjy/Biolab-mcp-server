@@ -210,6 +210,11 @@ GET /v1/projects/{project_id}/report?format=pdf
 Exports are checksummed and recorded. PDF generation is text-focused and
 server-side, so it does not depend on browser state.
 
+The hosted demo can parse the snapshots returned by the current browser request
+even when a serverless invocation cannot see the prior ephemeral SQLite row.
+Those runs are labeled `request-context` and are not durable; configure Turso
+for durable retrievals, ranking runs, and inference history.
+
 The `human_reviewed` assessment is an explicit workflow value. It must not be
 used to imply that Biolab itself performed the review.
 

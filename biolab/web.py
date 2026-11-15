@@ -325,7 +325,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       finally { saveReviewed.disabled = false; }
     });
     function renderInsights(result) {
-      insightSummary.textContent = `${result.insight_count ?? result.claims?.length ?? 0} grounded insights · ${result.parser_version}`;
+      insightSummary.textContent = `${result.insight_count ?? result.claims?.length ?? 0} grounded insights · ${result.parser_version}` + (result.durability === 'request-context' ? ' · session evidence only; configure Turso for durable citations' : '');
       insights.innerHTML = (result.insights || result.claims || []).map(claim => {
         const citations = (claim.citations || []).map(citation => `<span class="citation">${escapeHtml(citation.source)}:${escapeHtml(citation.external_id)} · ${escapeHtml(citation.field_name)} · ${escapeHtml(citation.excerpt || 'span preserved')}</span>`).join('');
         return `<article class="insight-card"><strong>${escapeHtml(claim.text)}</strong><div>${citations}</div></article>`;
@@ -339,7 +339,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         const response = await apiFetch('/v1/inferences', {
           method: 'POST', headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({question: document.querySelector('#query').value, retrieval_ids: latestRecords.map(record => record.retrieval_id), ranking_run_id: latestRanking.ranking_run_id, max_insights: 10, created_by: 'web:local'})
+          body: JSON.stringify({question: document.querySelector('#query').value, retrieval_ids: latestRecords.map(record => record.retrieval_id), evidence_records: latestRecords, ranking_run_id: latestRanking.ranking_run_id, max_insights: 10, created_by: 'web:local'})
         });
         const result = await response.json();
         if (!response.ok) throw new Error(result.error || `Inference returned ${response.status}`);
@@ -631,6 +631,7 @@ async def inferences(request: Request) -> JSONResponse:
             project_id=str(payload["project_id"]) if payload.get("project_id") else None,
             ranking_run_id=str(payload["ranking_run_id"]) if payload.get("ranking_run_id") else None,
             max_insights=int(payload.get("max_insights", 10)),
+            evidence_records=payload.get("evidence_records") if isinstance(payload.get("evidence_records"), list) else None,
         )
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)

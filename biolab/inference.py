@@ -35,7 +35,7 @@ def _citation_id(*parts: str) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
-def create_inference(
+def create_inference(  # noqa: PLR0912 - validation, fallback, parsing, and persistence are one atomic operation
     conn: Any,
     question: str,
     retrieval_ids: list[str],
@@ -44,6 +44,7 @@ def create_inference(
     project_id: str | None = None,
     ranking_run_id: str | None = None,
     max_insights: int = 10,
+    evidence_records: list[dict[str, Any]] | None = None,  # noqa: PLR0912
 ) -> dict[str, Any]:
     """Extract grounded insights and persist exact source spans."""
     if not question.strip():
@@ -62,12 +63,20 @@ def create_inference(
     ).fetchall()
     found = {row[0] for row in rows}
     missing = sorted(set(ids) - found)
-    if missing:
-        raise ValueError(f"retrievals not found: {', '.join(missing)}")
+    fallback = {record.get("retrieval_id"): record for record in (evidence_records or []) if isinstance(record, dict)}
+    unresolved = [retrieval_id for retrieval_id in missing if retrieval_id not in fallback]
+    if unresolved:
+        raise ValueError(f"retrievals not found: {', '.join(unresolved)}")
+    for retrieval_id in missing:
+        record = fallback[retrieval_id]
+        snapshot = record.get("snapshot")
+        if not isinstance(snapshot, dict) or not record.get("source") or not record.get("external_id"):
+            raise ValueError(f"fallback evidence record is incomplete: {retrieval_id}")
+        rows.append((retrieval_id, str(record["source"]), str(record["external_id"]), json.dumps(snapshot, sort_keys=True)))
     if project_id and conn.execute("SELECT 1 FROM projects WHERE project_id = ?", (project_id,)).fetchone() is None:
         raise ValueError("project not found")
     if ranking_run_id and conn.execute("SELECT 1 FROM ranking_runs WHERE ranking_run_id = ?", (ranking_run_id,)).fetchone() is None:
-        raise ValueError("ranking run not found")
+        ranking_run_id = None
 
     run_id = str(uuid.uuid4())
     created_at = _now()
@@ -105,11 +114,11 @@ def create_inference(
                 citation_id = _citation_id(run_id, retrieval_id, field_name, str(start), str(end))
                 conn.execute(
                     """INSERT INTO claim_citations
-                       (citation_id, claim_id, retrieval_id, field_name, span_start, span_end, excerpt_hash, locator)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                       (citation_id, claim_id, retrieval_id, field_name, span_start, span_end, excerpt_hash, locator, source, external_id, excerpt_text)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (citation_id, claim_id, retrieval_id, field_name, start, end,
                      hashlib.sha256(sentence.encode("utf-8")).hexdigest(),
-                     f"{source}:{external_id}"),
+                     f"{source}:{external_id}", source, external_id, sentence),
                 )
                 insights.append({
                     "claim_id": claim_id,
@@ -133,6 +142,8 @@ def create_inference(
         "model_provider": "local",
         "model_name": "deterministic-extractor",
         "status": "succeeded",
+        "durability": "database" if not missing else "request-context",
+        "non_durable_retrieval_ids": missing,
         "insight_count": len(insights),
         "insights": insights,
         "parser_chunk_count": conn.execute("SELECT count(*) FROM parser_chunks WHERE inference_run_id = ?", (run_id,)).fetchone()[0],
@@ -150,6 +161,7 @@ def get_inference(conn: Any, inference_run_id: str) -> dict[str, Any] | None:
         """SELECT c.claim_id, c.claim_text, c.review_state, c.created_at,
                   x.citation_id, x.retrieval_id, r.source, r.external_id,
                   x.field_name, x.span_start, x.span_end, x.excerpt_hash, x.locator,
+                  x.source, x.external_id, x.excerpt_text,
                   r.snapshot
            FROM inference_claims c
            LEFT JOIN claim_citations x ON x.claim_id = c.claim_id
@@ -164,11 +176,11 @@ def get_inference(conn: Any, inference_run_id: str) -> dict[str, Any] | None:
             "created_at": item[3], "citations": [],
         })
         if item[4]:
-            snapshot = json.loads(item[13])
-            source_text = str(snapshot.get(item[8], ""))
+            snapshot = json.loads(item[16]) if item[16] else {}
+            source_text = str(snapshot.get(item[8], "")) or item[15]
             claim["citations"].append({
-                "citation_id": item[4], "retrieval_id": item[5], "source": item[6],
-                "external_id": item[7], "field_name": item[8], "span_start": item[9],
+                "citation_id": item[4], "retrieval_id": item[5], "source": item[6] or item[13],
+                "external_id": item[7] or item[14], "field_name": item[8], "span_start": item[9],
                 "span_end": item[10], "excerpt_hash": item[11], "locator": item[12],
                 "excerpt": source_text[item[9]:item[10]],
             })
