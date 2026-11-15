@@ -65,6 +65,32 @@ def test_retrieval_and_verification_endpoints(tmp_path):
     }
 
 
+def test_ranking_api_returns_explanations_and_persists_run(tmp_path):
+    app = create_app(tmp_path / "ranking.db")
+    with TestClient(app) as client:
+        records = [
+            retrieval_log.write_retrieval(
+                app.state.conn, "KRAS trial", "1", "test", "pubmed", {}, "raw-1",
+                {"title": "KRAS randomized trial", "abstract": "KRAS study", "publication_types": ["Randomized Controlled Trial"]},
+            ),
+            retrieval_log.write_retrieval(
+                app.state.conn, "KRAS trial", "2", "test", "pubmed", {}, "raw-2",
+                {"title": "Unrelated paper", "abstract": "biology"},
+            ),
+        ]
+        response = client.post(
+            "/v1/rankings",
+            json={"question": "KRAS randomized trial", "retrieval_ids": [r.retrieval_id for r in records]},
+        )
+        fetched = client.get(f"/v1/rankings/{response.json()['ranking_run_id']}")
+
+    assert response.status_code == 201
+    assert response.json()["candidates"][0]["external_id"] == "1"
+    assert "score_components" in response.json()["candidates"][0]
+    assert fetched.status_code == 200
+    assert fetched.json()["candidates"][0]["review_state"] == "unreviewed"
+
+
 def test_bad_request_and_missing_retrieval(tmp_path):
     with TestClient(create_app(tmp_path / "web.db")) as client:
         bad = client.post("/v1/evidence/search", json={"query": "", "max_results": 0})

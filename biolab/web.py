@@ -13,7 +13,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
-from biolab import a2a, auth, db, evidence, retrieval_log, workspace
+from biolab import a2a, auth, db, evidence, ranking, retrieval_log, workspace
 
 OPENAPI_SCHEMA = {
     "openapi": "3.1.0",
@@ -26,6 +26,8 @@ OPENAPI_SCHEMA = {
         "/health": {"get": {"summary": "Health check"}},
         "/metrics": {"get": {"summary": "Local service counters and chain status"}},
         "/v1/evidence/search": {"post": {"summary": "Search and preserve evidence"}},
+        "/v1/rankings": {"post": {"summary": "Rank preserved retrievals with explanations"}},
+        "/v1/rankings/{ranking_run_id}": {"get": {"summary": "Get a ranking run"}},
         "/v1/retrievals/{retrieval_id}": {"get": {"summary": "Fetch a preserved retrieval"}},
         "/v1/verify": {"get": {"summary": "Verify the audit hash chain"}},
         "/v1/projects": {
@@ -389,6 +391,38 @@ async def get_retrieval(request: Request) -> JSONResponse:
     return JSONResponse(_record_payload(record))
 
 
+async def rankings(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+        retrieval_ids = payload.get("retrieval_ids", [])
+        if not isinstance(retrieval_ids, list) or not all(isinstance(item, str) for item in retrieval_ids):
+            return JSONResponse({"error": "retrieval_ids must be a list of strings"}, status_code=400)
+        created_by = auth.bind_agent_id(str(payload.get("created_by", "api:ranking")), request)
+        result = ranking.rank_retrievals(
+            request.app.state.conn,
+            str(payload.get("question", "")),
+            retrieval_ids,
+            created_by=created_by,
+            project_id=str(payload["project_id"]) if payload.get("project_id") else None,
+            requested_limit=int(payload.get("requested_limit", 5)),
+            as_of=str(payload["as_of"]) if payload.get("as_of") else None,
+        )
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result, status_code=201)
+
+
+async def ranking_detail(request: Request) -> JSONResponse:
+    result = ranking.get_ranking(
+        request.app.state.conn, request.path_params["ranking_run_id"]
+    )
+    if result is None:
+        return JSONResponse({"error": "ranking run not found"}, status_code=404)
+    return JSONResponse(result)
+
+
 async def verify(request: Request) -> JSONResponse:
     valid, broken_id = retrieval_log.verify_chain(request.app.state.conn)
     count = request.app.state.conn.execute("SELECT count(*) FROM retrievals").fetchone()[0]
@@ -591,6 +625,8 @@ def api_routes() -> list[Route]:
         Route("/openapi.json", openapi),
         Route("/metrics", metrics),
         Route("/v1/evidence/search", search, methods=["POST"]),
+        Route("/v1/rankings", rankings, methods=["POST"]),
+        Route("/v1/rankings/{ranking_run_id}", ranking_detail),
         Route("/v1/retrievals/{retrieval_id}", get_retrieval),
         Route("/v1/verify", verify),
         Route("/v1/projects", projects, methods=["GET", "POST"]),

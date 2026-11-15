@@ -152,6 +152,18 @@ biolab get <retrieval_id>
 biolab verify --db biolab.db
 ```
 
+Rank preserved results with an explainable, deterministic scorer through REST:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/rankings \
+  -H 'content-type: application/json' \
+  -d '{"question":"KRAS randomized trial", "retrieval_ids":["<retrieval_id>"]}'
+```
+
+The response contains the rank, total score, component scores, matched terms,
+missing facets, and reason codes. The score describes fit to the query; it is
+not a scientific truth or clinical-quality score.
+
 The multi-source operation preserves source-specific results and explicit
 source errors. A returned record is preserved evidence, not an assertion that
 the result is relevant or scientifically correct.
@@ -204,6 +216,8 @@ Important REST routes:
 
 ```text
 POST /v1/evidence/search
+POST /v1/rankings
+GET  /v1/rankings/{ranking_run_id}
 GET  /v1/retrievals/{retrieval_id}
 GET  /v1/projects
 POST /v1/projects

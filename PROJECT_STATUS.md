@@ -27,6 +27,9 @@ it does not validate scientific conclusions or provide clinical advice.
 - A BioClaw skill and zero-dependency REST client.
 - A2A Agent Card and JSON-RPC task adapter.
 - Unified Vercel deployment for MCP, REST, dashboard, health, OpenAPI, and A2A.
+- Deterministic ranking v1 for preserved retrievals, including stored score
+  components, matched terms, missing facets, reason codes, REST routes, and MCP
+  tools. Ranking is query-fit evidence triage, not scientific validation.
 - Offline demo, integrity verification, package metadata, and test coverage.
 
 ## Architecture boundaries

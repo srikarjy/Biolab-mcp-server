@@ -136,6 +136,44 @@ CREATE INDEX IF NOT EXISTS idx_watches_project ON evidence_watches(project_id);
 CREATE INDEX IF NOT EXISTS idx_events_watch ON evidence_events(watch_id, detected_at);
 CREATE INDEX IF NOT EXISTS idx_claims_project ON claims(project_id);
 CREATE INDEX IF NOT EXISTS idx_claim_evidence_retrieval ON claim_evidence(retrieval_id);
+
+CREATE TABLE IF NOT EXISTS ranking_runs (
+    ranking_run_id  TEXT PRIMARY KEY,
+    project_id      TEXT,
+    question        TEXT NOT NULL,
+    query_facets    TEXT NOT NULL,
+    algorithm_version TEXT NOT NULL,
+    requested_limit INTEGER NOT NULL,
+    as_of           TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    created_by      TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+
+CREATE TABLE IF NOT EXISTS ranking_candidates (
+    ranking_candidate_id TEXT PRIMARY KEY,
+    ranking_run_id       TEXT NOT NULL,
+    retrieval_id         TEXT NOT NULL,
+    rank                 INTEGER NOT NULL,
+    score_total          REAL NOT NULL,
+    score_components     TEXT NOT NULL,
+    reason_codes         TEXT NOT NULL,
+    matched_terms        TEXT NOT NULL,
+    missing_facets       TEXT NOT NULL,
+    review_state         TEXT NOT NULL DEFAULT 'unreviewed',
+    review_note          TEXT NOT NULL DEFAULT '',
+    reviewed_by          TEXT,
+    reviewed_at          TEXT,
+    UNIQUE (ranking_run_id, retrieval_id),
+    FOREIGN KEY (ranking_run_id) REFERENCES ranking_runs(ranking_run_id),
+    FOREIGN KEY (retrieval_id) REFERENCES retrievals(retrieval_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ranking_runs_project ON ranking_runs(project_id);
+CREATE INDEX IF NOT EXISTS idx_ranking_candidates_run ON ranking_candidates(ranking_run_id, rank);
+CREATE INDEX IF NOT EXISTS idx_ranking_candidates_retrieval ON ranking_candidates(retrieval_id);
 """
 
 # Tracks the target (Turso URL or local path) most recently connected to, so

@@ -267,6 +267,41 @@ credentials are absent. The UI flow is fixed, but durable cross-instance
 projects and evidence require `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in
 the deployment environment.
 
+## 2026-11-14 — Add deterministic paper-ranking foundation
+
+### Problem
+
+The workspace preserved scientific retrievals but had no transparent way to
+triage several returned papers or explain why one appeared above another.
+
+### Investigation
+
+Existing source adapters already normalize titles, abstracts, publication types,
+journal dates, and source metadata into retrieval snapshots. The existing
+retrieval IDs and hash chain provide stable provenance links for derived ranking
+records.
+
+### Solution
+
+Added `ranking_runs` and `ranking_candidates` tables plus a deterministic v1
+scorer. It combines query fit, entity/subject fit, requested study-design fit,
+recency, and metadata completeness. Each candidate stores its component scores,
+matched terms, missing facets, and reason codes. Added REST endpoints and MCP
+tools so all delivery surfaces can use the same ranking service.
+
+### Verification
+
+- Full offline suite: `108 passed, 28 deselected`.
+- Ruff and MyPy pass.
+- Ranking tests cover exact/title matches, missing metadata, deterministic
+  ordering, top-five persistence, and unknown retrieval rejection.
+- REST test covers ranking creation and retrieval of stored explanations.
+
+### Boundary preserved
+
+The score means query-fit triage only. It does not establish paper quality,
+scientific truth, clinical validity, or replace scientist review.
+
 ## Entry template
 
 Use this shape for future complex problems:

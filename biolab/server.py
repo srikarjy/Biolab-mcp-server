@@ -17,6 +17,7 @@ from biolab import (
     europepmc_client,
     executions,
     pubmed_client,
+    ranking,
     retrieval_log,
     tools,
     web,
@@ -97,6 +98,37 @@ def search_evidence(
         sources=sources or list(evidence_service.SUPPORTED_SOURCES),
         max_results=max_results,
     )
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def rank_evidence(
+    question: str,
+    retrieval_ids: list[str],
+    agent_id: str,
+    ctx: Context,
+    project_id: str | None = None,
+    requested_limit: int = 5,
+    as_of: str | None = None,
+) -> dict:
+    """Rank preserved retrievals with deterministic score components and reasons."""
+    return ranking.rank_retrievals(
+        _conn,
+        question,
+        retrieval_ids,
+        created_by=_bound(agent_id, ctx),
+        project_id=project_id,
+        requested_limit=requested_limit,
+        as_of=as_of,
+    )
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_ranking(ranking_run_id: str) -> dict:
+    """Fetch a ranking run and its stored explanations and review states."""
+    result = ranking.get_ranking(_conn, ranking_run_id)
+    if result is None:
+        raise ValueError("ranking run not found")
+    return result
 
 
 @mcp.tool(name="search", annotations=SEARCH_ANNOTATIONS)
