@@ -62,7 +62,24 @@ CREATE TABLE IF NOT EXISTS projects (
     project_id   TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     description  TEXT NOT NULL DEFAULT '',
-    created_at   TEXT NOT NULL
+    created_at   TEXT NOT NULL,
+    owner_id     TEXT NOT NULL DEFAULT 'local',
+    organization_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS organizations (
+    organization_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS organization_members (
+    organization_id TEXT NOT NULL,
+    member_id TEXT NOT NULL,
+    role TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (organization_id, member_id),
+    FOREIGN KEY (organization_id) REFERENCES organizations(organization_id)
 );
 
 CREATE TABLE IF NOT EXISTS evidence_collections (
@@ -136,6 +153,125 @@ CREATE INDEX IF NOT EXISTS idx_watches_project ON evidence_watches(project_id);
 CREATE INDEX IF NOT EXISTS idx_events_watch ON evidence_events(watch_id, detected_at);
 CREATE INDEX IF NOT EXISTS idx_claims_project ON claims(project_id);
 CREATE INDEX IF NOT EXISTS idx_claim_evidence_retrieval ON claim_evidence(retrieval_id);
+
+CREATE TABLE IF NOT EXISTS ranking_runs (
+    ranking_run_id  TEXT PRIMARY KEY,
+    project_id      TEXT,
+    question        TEXT NOT NULL,
+    query_facets    TEXT NOT NULL,
+    algorithm_version TEXT NOT NULL,
+    requested_limit INTEGER NOT NULL,
+    as_of           TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    created_by      TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+
+CREATE TABLE IF NOT EXISTS ranking_candidates (
+    ranking_candidate_id TEXT PRIMARY KEY,
+    ranking_run_id       TEXT NOT NULL,
+    retrieval_id         TEXT NOT NULL,
+    rank                 INTEGER NOT NULL,
+    score_total          REAL NOT NULL,
+    score_components     TEXT NOT NULL,
+    reason_codes         TEXT NOT NULL,
+    matched_terms        TEXT NOT NULL,
+    missing_facets       TEXT NOT NULL,
+    review_state         TEXT NOT NULL DEFAULT 'unreviewed',
+    review_note          TEXT NOT NULL DEFAULT '',
+    reviewed_by          TEXT,
+    reviewed_at          TEXT,
+    UNIQUE (ranking_run_id, retrieval_id),
+    FOREIGN KEY (ranking_run_id) REFERENCES ranking_runs(ranking_run_id),
+    FOREIGN KEY (retrieval_id) REFERENCES retrievals(retrieval_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ranking_runs_project ON ranking_runs(project_id);
+CREATE INDEX IF NOT EXISTS idx_ranking_candidates_run ON ranking_candidates(ranking_run_id, rank);
+CREATE INDEX IF NOT EXISTS idx_ranking_candidates_retrieval ON ranking_candidates(retrieval_id);
+
+CREATE TABLE IF NOT EXISTS inference_runs (
+    inference_run_id  TEXT PRIMARY KEY,
+    project_id        TEXT,
+    ranking_run_id    TEXT,
+    question          TEXT NOT NULL,
+    parser_version    TEXT NOT NULL,
+    model_provider    TEXT NOT NULL,
+    model_name        TEXT NOT NULL,
+    status            TEXT NOT NULL,
+    created_by        TEXT NOT NULL,
+    created_at        TEXT NOT NULL,
+    completed_at      TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id),
+    FOREIGN KEY (ranking_run_id) REFERENCES ranking_runs(ranking_run_id)
+);
+
+CREATE TABLE IF NOT EXISTS inference_claims (
+    claim_id          TEXT PRIMARY KEY,
+    inference_run_id  TEXT NOT NULL,
+    claim_text        TEXT NOT NULL,
+    review_state      TEXT NOT NULL DEFAULT 'unreviewed',
+    created_at        TEXT NOT NULL,
+    FOREIGN KEY (inference_run_id) REFERENCES inference_runs(inference_run_id)
+);
+
+CREATE TABLE IF NOT EXISTS claim_citations (
+    citation_id       TEXT PRIMARY KEY,
+    claim_id          TEXT NOT NULL,
+    retrieval_id      TEXT NOT NULL,
+    field_name        TEXT NOT NULL,
+    span_start        INTEGER NOT NULL,
+    span_end          INTEGER NOT NULL,
+    excerpt_hash      TEXT NOT NULL,
+    locator           TEXT NOT NULL,
+    source            TEXT NOT NULL DEFAULT '',
+    external_id      TEXT NOT NULL DEFAULT '',
+    excerpt_text     TEXT NOT NULL DEFAULT '',
+    FOREIGN KEY (claim_id) REFERENCES inference_claims(claim_id),
+    FOREIGN KEY (retrieval_id) REFERENCES retrievals(retrieval_id)
+);
+
+CREATE TABLE IF NOT EXISTS parser_chunks (
+    chunk_id          TEXT PRIMARY KEY,
+    inference_run_id  TEXT NOT NULL,
+    retrieval_id      TEXT NOT NULL,
+    field_name        TEXT NOT NULL,
+    chunk_index       INTEGER NOT NULL,
+    chunk_text        TEXT NOT NULL,
+    created_at        TEXT NOT NULL,
+    FOREIGN KEY (inference_run_id) REFERENCES inference_runs(inference_run_id),
+    FOREIGN KEY (retrieval_id) REFERENCES retrievals(retrieval_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_inference_runs_project ON inference_runs(project_id);
+CREATE INDEX IF NOT EXISTS idx_inference_claims_run ON inference_claims(inference_run_id);
+CREATE INDEX IF NOT EXISTS idx_claim_citations_claim ON claim_citations(claim_id);
+CREATE INDEX IF NOT EXISTS idx_claim_citations_retrieval ON claim_citations(retrieval_id);
+CREATE INDEX IF NOT EXISTS idx_parser_chunks_run ON parser_chunks(inference_run_id);
+
+CREATE TABLE IF NOT EXISTS exports (
+    export_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, format TEXT NOT NULL,
+    status TEXT NOT NULL, checksum TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+    created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_exports_project ON exports(project_id, created_at);
+
+CREATE TABLE IF NOT EXISTS parser_runs (
+    parser_run_id TEXT PRIMARY KEY, project_id TEXT, filename TEXT NOT NULL, parser_model TEXT NOT NULL,
+    source_hash TEXT NOT NULL, status TEXT NOT NULL, block_count INTEGER NOT NULL,
+    created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE TABLE IF NOT EXISTS parsed_blocks (
+    block_id TEXT PRIMARY KEY, parser_run_id TEXT NOT NULL, page_number INTEGER NOT NULL,
+    block_index INTEGER NOT NULL, block_type TEXT NOT NULL, text TEXT NOT NULL,
+    bbox TEXT, content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+    FOREIGN KEY (parser_run_id) REFERENCES parser_runs(parser_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_parsed_blocks_run ON parsed_blocks(parser_run_id, page_number, block_index);
 """
 
 # Tracks the target (Turso URL or local path) most recently connected to, so
@@ -184,6 +320,28 @@ def _upgrade_retrievals(conn: Any) -> None:
         conn.execute("ALTER TABLE retrievals ADD COLUMN hash_version INTEGER NOT NULL DEFAULT 1")
 
 
+def _upgrade_projects(conn: Any) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
+    if "owner_id" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'local'")
+    if "organization_id" not in columns:
+        conn.execute("ALTER TABLE projects ADD COLUMN organization_id TEXT")
+
+
+def _upgrade_citations(conn: Any) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(claim_citations)").fetchall()}
+    for name in ("source", "external_id", "excerpt_text"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE claim_citations ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
+
+
+def _upgrade_parser_runs(conn: Any) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(parser_runs)").fetchall()}
+    if "project_id" not in columns:
+        conn.execute("ALTER TABLE parser_runs ADD COLUMN project_id TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_parser_runs_project ON parser_runs(project_id, created_at)")
+
+
 def connect(db_path: str) -> Any:
     global _current_target
     target, token = resolve_target(db_path)
@@ -191,6 +349,11 @@ def connect(db_path: str) -> Any:
     conn = open_connection(target, token)
     conn.executescript(SCHEMA_V2)
     _upgrade_retrievals(conn)
+    _upgrade_projects(conn)
+    _upgrade_citations(conn)
+    _upgrade_parser_runs(conn)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_org ON projects(organization_id)")
     conn.commit()
     _current_target = target
     return conn

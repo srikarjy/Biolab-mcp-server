@@ -4,16 +4,28 @@ This surface deliberately defaults to loopback-only operation. It reuses the
 same evidence and retrieval services as the CLI and MCP server.
 """
 
+import base64
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
 
-from biolab import a2a, auth, db, evidence, retrieval_log, workspace
+from biolab import (
+    a2a,
+    auth,
+    db,
+    document_parser,
+    evidence,
+    exports,
+    inference,
+    ranking,
+    retrieval_log,
+    workspace,
+)
 
 OPENAPI_SCHEMA = {
     "openapi": "3.1.0",
@@ -26,13 +38,25 @@ OPENAPI_SCHEMA = {
         "/health": {"get": {"summary": "Health check"}},
         "/metrics": {"get": {"summary": "Local service counters and chain status"}},
         "/v1/evidence/search": {"post": {"summary": "Search and preserve evidence"}},
+        "/v1/rankings": {"post": {"summary": "Rank preserved retrievals with explanations"}},
+        "/v1/rankings/{ranking_run_id}": {"get": {"summary": "Get a ranking run"}},
+        "/v1/rankings/{ranking_run_id}/candidates/{ranking_candidate_id}/review": {"post": {"summary": "Review a ranked candidate"}},
+        "/v1/inferences": {"post": {"summary": "Create citation-safe grounded insights"}},
+        "/v1/inferences/{inference_run_id}": {"get": {"summary": "Get grounded insights and citations"}},
+        "/v1/inferences/{inference_run_id}/flush": {"post": {"summary": "Flush disposable parser chunks"}},
+        "/v1/parser/parse": {"post": {"summary": "Parse a PDF through the configured Hugging Face parser"}},
+        "/v1/projects/{project_id}/parser-runs": {"get": {"summary": "List parsed documents in a project folder"}},
+        "/v1/parser/runs/{parser_run_id}": {"get": {"summary": "Inspect parsed document blocks"}},
+        "/v1/parser/runs/{parser_run_id}/flush": {"post": {"summary": "Flush parsed document blocks"}},
+        "/v1/parser/runs/{parser_run_id}/download": {"get": {"summary": "Download parsed document JSON"}},
         "/v1/retrievals/{retrieval_id}": {"get": {"summary": "Fetch a preserved retrieval"}},
         "/v1/verify": {"get": {"summary": "Verify the audit hash chain"}},
         "/v1/projects": {
             "get": {"summary": "List projects"},
             "post": {"summary": "Create a project"},
         },
-        "/v1/projects/{project_id}/report": {"get": {"summary": "Export a project report"}},
+        "/v1/projects/{project_id}/report": {"get": {"summary": "Export a project report as JSON, Markdown, or PDF"}},
+        "/v1/projects/{project_id}/save-reviewed": {"post": {"summary": "Save accepted ranking candidates to project evidence"}},
         "/v1/collections": {
             "get": {"summary": "List evidence collections"},
             "post": {"summary": "Create an evidence collection"},
@@ -121,6 +145,22 @@ DASHBOARD_HTML = r"""<!doctype html>
     .record-id { color: var(--muted); font-size: .69rem; }
     .evidence-card p { margin: 0 0 12px; color: #5b7077; font-size: .8rem; line-height: 1.5; }
     .evidence-card a { color: var(--teal-dark); font-size: .8rem; font-weight: 800; text-decoration: none; }
+    .ranking-section { margin-top: 26px; padding-top: 26px; border-top: 1px solid var(--line); }
+    .ranking-cards { display: grid; gap: 12px; }
+    .ranking-card { padding: 17px; border: 1px solid #cfe2d7; border-radius: 16px; background: #fbfefc; }
+    .ranking-card .card-meta { margin-bottom: 10px; }
+    .rank-score { color: var(--teal-dark); font-size: .78rem; font-weight: 850; }
+    .score-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 6px; margin: 12px 0; }
+    .score-cell { padding: 7px; border-radius: 8px; color: #536970; background: #f0f7f2; font-size: .66rem; }
+    .score-cell strong { display: block; color: var(--ink); font-size: .76rem; }
+    .reason-line { margin: 9px 0; color: #536970; font-size: .76rem; line-height: 1.45; }
+    .review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; margin-top: 12px; }
+    .review-actions button { min-height: 34px; padding: .45rem .65rem; font-size: .7rem; }
+    .review-status { color: var(--teal-dark); font-size: .72rem; font-weight: 800; }
+    .insight-section { margin-top: 26px; padding: 18px; border: 1px solid #d8e4eb; border-radius: 16px; background: #fbfdff; }
+    .insight-card { padding: 13px 0; border-top: 1px solid #e5edf1; color: #405963; font-size: .82rem; line-height: 1.5; }
+    .insight-card:first-child { border-top: 0; }
+    .citation { display: inline-block; margin: 7px 5px 0 0; padding: 4px 7px; border-radius: 7px; color: var(--teal-dark); background: #e1f4e8; font-size: .69rem; font-weight: 800; }
     .empty { grid-column: 1 / -1; padding: 28px; border: 1px dashed #bfd4cb; border-radius: 17px; color: var(--muted); background: #fbfdfb; text-align: center; }
     code { overflow-wrap: anywhere; }
     .muted { color: var(--muted); }
@@ -194,12 +234,36 @@ DASHBOARD_HTML = r"""<!doctype html>
     <section class="results-section" aria-labelledby="evidence-title">
       <div class="results-head"><div><p class="eyebrow">Evidence ledger</p><h2 id="evidence-title">Preserved results</h2><p id="summary" class="summary">Ready for your first evidence pass.</p></div><span class="badge">Step 02 / inspect</span></div>
       <div id="results" class="cards"><div class="empty">Your evidence ledger is empty. Run a focused search to create the first preserved record.</div></div>
+      <section id="ranking-section" class="ranking-section" hidden aria-labelledby="ranking-title">
+        <div class="results-head"><div><p class="eyebrow">Review queue</p><h2 id="ranking-title">Top-ranked papers</h2><p id="ranking-summary" class="summary">Ranking preserved results…</p></div><span class="badge">Step 03 / review</span></div>
+        <div id="ranking-results" class="ranking-cards"></div>
+        <button id="generate-insights" class="secondary" type="button" style="margin-top:14px">Generate grounded insights</button>
+        <button id="save-reviewed" class="secondary" type="button" style="margin:14px 0 0 8px" disabled>Save accepted papers to selected project</button>
+      </section>
+      <section id="insight-section" class="insight-section" hidden aria-labelledby="insight-title">
+        <div class="results-head"><div><p class="eyebrow">Evidence-grounded inference</p><h2 id="insight-title">Extracted insights</h2><p id="insight-summary" class="summary"></p></div><span class="badge">Step 04 / cite</span></div>
+        <div id="insights" class="insight-cards"></div>
+        <button id="flush-parser" class="secondary" type="button" style="margin-top:12px">Flush temporary parser data</button>
+      </section>
     </section>
   </main>
   <script>
     const form = document.querySelector('#search-form');
     const summary = document.querySelector('#summary');
     const results = document.querySelector('#results');
+    const rankingSection = document.querySelector('#ranking-section');
+    const rankingSummary = document.querySelector('#ranking-summary');
+    const rankingResults = document.querySelector('#ranking-results');
+    const generateInsights = document.querySelector('#generate-insights');
+    const saveReviewed = document.querySelector('#save-reviewed');
+    const insightSection = document.querySelector('#insight-section');
+    const insightSummary = document.querySelector('#insight-summary');
+    const insights = document.querySelector('#insights');
+    const flushParser = document.querySelector('#flush-parser');
+    let latestRecords = [];
+    let latestRanking = null;
+    let latestProjectId = null;
+    let latestInferenceRunId = null;
     const apiBase = window.location.pathname.startsWith('/api') ? '/api' : '';
     const apiFetch = (url, options = {}) => {
       const key = document.querySelector('#api-key').value.trim();
@@ -214,6 +278,104 @@ DASHBOARD_HTML = r"""<!doctype html>
       const id = String(value ?? '');
       return id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-6)}` : id;
     };
+    const scoreLabel = (name) => name.replaceAll('_', ' ');
+    function renderRanking(run, records) {
+      const byId = Object.fromEntries(records.map(record => [record.retrieval_id, record]));
+      rankingSummary.textContent = `${run.candidate_count} papers ranked with ${run.algorithm_version}`;
+      rankingResults.innerHTML = run.candidates.map(candidate => {
+        const record = byId[candidate.retrieval_id] || {};
+        const snap = record.snapshot || {};
+        const title = snap.title || snap.name || snap.primary_accession || candidate.external_id;
+        const components = Object.entries(candidate.score_components).map(([name, value]) =>
+          `<span class="score-cell">${escapeHtml(scoreLabel(name))}<strong>${(Number(value) * 100).toFixed(0)}%</strong></span>`).join('');
+        const reasons = candidate.reason_codes.map(reason => escapeHtml(reason.replaceAll('_', ' '))).join(', ') || 'No explanation codes';
+        const matched = candidate.matched_terms.length ? candidate.matched_terms.map(escapeHtml).join(', ') : 'None recorded';
+        const missing = candidate.missing_facets.length ? candidate.missing_facets.map(escapeHtml).join(', ') : 'None';
+        return `<article class="ranking-card" data-candidate-id="${escapeHtml(candidate.ranking_candidate_id)}">
+          <div class="card-meta"><span class="badge">Rank ${candidate.rank}</span><span class="rank-score">${(Number(candidate.score_total) * 100).toFixed(1)}% fit</span></div>
+          <h3>${escapeHtml(title)}</h3>
+          <p class="reason-line"><strong>Why:</strong> ${reasons}</p>
+          <div class="score-grid">${components}</div>
+          <p class="reason-line"><strong>Matched:</strong> ${matched}<br><strong>Missing:</strong> ${missing}<br><strong>Source:</strong> ${escapeHtml(record.source || candidate.source)} · ${escapeHtml(candidate.external_id)}</p>
+          <div class="review-actions" data-run-id="${escapeHtml(run.ranking_run_id)}">
+            <button class="secondary" type="button" data-review-state="accepted">Accept</button>
+            <button class="secondary" type="button" data-review-state="rejected">Reject</button>
+            <button class="secondary" type="button" data-review-state="conflicting">Conflicting</button>
+            <span class="review-status">Unreviewed</span>
+          </div>
+        </article>`;
+      }).join('') || '<div class="empty">No candidates were available to rank.</div>';
+    }
+    rankingResults.addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-review-state]');
+      if (!button) return;
+      const card = button.closest('[data-candidate-id]');
+      const actions = button.closest('[data-run-id]');
+      const status = actions.querySelector('.review-status');
+      button.disabled = true;
+      try {
+        const response = await apiFetch(`/v1/rankings/${encodeURIComponent(actions.dataset.runId)}/candidates/${encodeURIComponent(card.dataset.candidateId)}/review`, {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({review_state: button.dataset.reviewState, reviewed_by: 'web:local'})
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Review returned ${response.status}`);
+        const reviewed = latestRanking?.candidates?.find(candidate => candidate.ranking_candidate_id === card.dataset.candidateId);
+        if (reviewed) reviewed.review_state = result.review_state;
+        saveReviewed.disabled = !(latestProjectId && latestRanking?.candidates?.some(candidate => candidate.review_state === 'accepted'));
+        status.textContent = `Marked ${result.review_state}`;
+      } catch (error) { status.textContent = String(error); }
+      finally { button.disabled = false; }
+    });
+    saveReviewed.addEventListener('click', async () => {
+      if (!latestProjectId || !latestRanking) return;
+      const accepted = latestRanking.candidates.filter(candidate => candidate.review_state === 'accepted').map(candidate => candidate.ranking_candidate_id);
+      if (!accepted.length) return;
+      saveReviewed.disabled = true;
+      try {
+        const response = await apiFetch(`/v1/projects/${encodeURIComponent(latestProjectId)}/save-reviewed`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ranking_run_id: latestRanking.ranking_run_id, candidate_ids: accepted})});
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Save returned ${response.status}`);
+        document.querySelector('#project-detail').hidden = false;
+        document.querySelector('#project-detail').textContent = `Saved ${result.saved_count} reviewed paper(s) to the project collection.`;
+      } catch (error) { document.querySelector('#project-detail').textContent = String(error); }
+      finally { saveReviewed.disabled = false; }
+    });
+    function renderInsights(result) {
+      insightSummary.textContent = `${result.insight_count ?? result.claims?.length ?? 0} grounded insights · ${result.parser_version}` + (result.durability === 'request-context' ? ' · session evidence only; configure Turso for durable citations' : '');
+      insights.innerHTML = (result.insights || result.claims || []).map(claim => {
+        const citations = (claim.citations || []).map(citation => `<span class="citation">${escapeHtml(citation.source)}:${escapeHtml(citation.external_id)} · ${escapeHtml(citation.field_name)} · ${escapeHtml(citation.excerpt || 'span preserved')}</span>`).join('');
+        return `<article class="insight-card"><strong>${escapeHtml(claim.text)}</strong><div>${citations}</div></article>`;
+      }).join('') || '<div class="empty">No grounded sentence matched the question terms.</div>';
+    }
+    generateInsights.addEventListener('click', async () => {
+      if (!latestRanking || !latestRecords.length) return;
+      generateInsights.disabled = true;
+      insightSection.hidden = false;
+      insightSummary.textContent = 'Parsing preserved evidence and validating citations…';
+      try {
+        const response = await apiFetch('/v1/inferences', {
+          method: 'POST', headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({question: document.querySelector('#query').value, retrieval_ids: latestRecords.map(record => record.retrieval_id), evidence_records: latestRecords, ranking_run_id: latestRanking.ranking_run_id, max_insights: 10, created_by: 'web:local'})
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Inference returned ${response.status}`);
+        latestInferenceRunId = result.inference_run_id;
+        renderInsights(result);
+      } catch (error) { insightSummary.textContent = String(error); }
+      finally { generateInsights.disabled = false; }
+    });
+    flushParser.addEventListener('click', async () => {
+      if (!latestInferenceRunId) return;
+      flushParser.disabled = true;
+      try {
+        const response = await apiFetch(`/v1/inferences/${encodeURIComponent(latestInferenceRunId)}/flush`, {method: 'POST'});
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Flush returned ${response.status}`);
+        insightSummary.textContent += ` · ${result.flushed_parser_chunks} temporary chunks flushed; citations preserved`;
+      } catch (error) { insightSummary.textContent = String(error); }
+      finally { flushParser.disabled = false; }
+    });
     async function verify() {
       const audit = document.querySelector('#audit');
       const button = document.querySelector('#verify');
@@ -235,6 +397,8 @@ DASHBOARD_HTML = r"""<!doctype html>
         : '<li class="muted">No projects yet.</li>';
     }
     async function loadProject(projectId) {
+      latestProjectId = projectId;
+      saveReviewed.disabled = !(latestRanking?.candidates?.some(candidate => candidate.review_state === 'accepted'));
       const detail = document.querySelector('#project-detail');
       detail.hidden = false;
       detail.textContent = 'Loading project report…';
@@ -250,7 +414,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const project = report.project || {};
         detail.innerHTML = `<strong>${escapeHtml(project.name || 'Project')}</strong><br>
           ${escapeHtml(project.description || 'No description')}<br>
-          ${report.collections.length} collections · ${report.claims.length} claims · ${report.watches.length} watches<br>
+          ${report.collections.length} collections · ${report.claims.length} claims · ${(report.parser_runs || []).length} parsed documents · ${report.watches.length} watches<br>
           <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report" target="_blank" rel="noreferrer">Open JSON report ↗</a> ·
           <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report?format=markdown" target="_blank" rel="noreferrer">Open Markdown report ↗</a>`;
       } catch (error) { detail.textContent = String(error); }
@@ -286,6 +450,13 @@ DASHBOARD_HTML = r"""<!doctype html>
       document.querySelector('#search-label').textContent = 'Searching sources…';
       summary.textContent = 'Searching sources and preserving returned records…';
       results.innerHTML = '';
+      rankingSection.hidden = true;
+      rankingResults.innerHTML = '';
+      insightSection.hidden = true;
+      insights.innerHTML = '';
+      latestRecords = [];
+      latestRanking = null;
+      latestInferenceRunId = null;
       const payload = {
         query: document.querySelector('#query').value,
         sources: document.querySelector('#sources').value.split(',').map(x => x.trim()).filter(Boolean),
@@ -301,6 +472,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           (Object.keys(result.errors).length ? `; errors: ${JSON.stringify(result.errors)}` : '');
         await verify();
         const records = Object.values(result.sources).flat();
+        latestRecords = records;
         results.innerHTML = records.map(record => {
           const snap = record.snapshot || {};
           const title = snap.title || snap.name || snap.primary_accession || record.external_id;
@@ -310,9 +482,23 @@ DASHBOARD_HTML = r"""<!doctype html>
             <h3>${escapeHtml(title)}</h3><p>Preserved retrieval <code>${escapeHtml(record.retrieval_id)}</code></p>
             ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Open source ↗</a>` : ''}</article>`;
         }).join('') || '<div class="empty">No records returned. Check the source selection or broaden the question.</div>';
+        if (records.length) {
+          rankingSection.hidden = false;
+          rankingSummary.textContent = 'Ranking preserved results…';
+          const rankingResponse = await apiFetch('/v1/rankings', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({question: payload.query, retrieval_ids: records.map(record => record.retrieval_id), requested_limit: 5, created_by: 'web:local'})
+          });
+          const rankingResult = await rankingResponse.json();
+          if (!rankingResponse.ok) throw new Error(rankingResult.error || `Ranking returned ${rankingResponse.status}`);
+          latestRanking = rankingResult;
+          renderRanking(rankingResult, records);
+          saveReviewed.disabled = !(latestProjectId && rankingResult.candidates.some(candidate => candidate.review_state === 'accepted'));
+        }
       } catch (error) {
         summary.textContent = 'Search failed. The source error is preserved in the API response when available.';
         results.innerHTML = `<div class="empty">${escapeHtml(error)}</div>`;
+        rankingSection.hidden = true;
       } finally { button.disabled = false; document.querySelector('#search-label').textContent = 'Search and preserve evidence'; }
     });
     verify(); loadProjects();
@@ -386,7 +572,155 @@ async def get_retrieval(request: Request) -> JSONResponse:
     record = retrieval_log.get_retrieval(request.app.state.conn, retrieval_id)
     if record is None:
         return JSONResponse({"error": "retrieval not found"}, status_code=404)
+    if auth.is_authenticated(request) and record.agent_id != auth.request_identity(request):
+        return JSONResponse({"error": "retrieval not found"}, status_code=404)
     return JSONResponse(_record_payload(record))
+
+
+async def rankings(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "request body must be a JSON object"}, status_code=400)
+        retrieval_ids = payload.get("retrieval_ids", [])
+        if not isinstance(retrieval_ids, list) or not all(isinstance(item, str) for item in retrieval_ids):
+            return JSONResponse({"error": "retrieval_ids must be a list of strings"}, status_code=400)
+        if auth.is_authenticated(request):
+            identity = auth.request_identity(request)
+            inaccessible = [item for item in retrieval_ids if (record := retrieval_log.get_retrieval(request.app.state.conn, item)) is None or record.agent_id != identity]
+            if inaccessible:
+                return JSONResponse({"error": "retrieval access denied"}, status_code=404)
+        created_by = auth.bind_agent_id(str(payload.get("created_by", "api:ranking")), request)
+        result = ranking.rank_retrievals(
+            request.app.state.conn,
+            str(payload.get("question", "")),
+            retrieval_ids,
+            created_by=created_by,
+            project_id=str(payload["project_id"]) if payload.get("project_id") else None,
+            requested_limit=int(payload.get("requested_limit", 5)),
+            as_of=str(payload["as_of"]) if payload.get("as_of") else None,
+        )
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result, status_code=201)
+
+
+async def ranking_detail(request: Request) -> JSONResponse:
+    result = ranking.get_ranking(
+        request.app.state.conn, request.path_params["ranking_run_id"]
+    )
+    if result is None:
+        return JSONResponse({"error": "ranking run not found"}, status_code=404)
+    return JSONResponse(result)
+
+
+async def ranking_review(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        result = ranking.review_candidate(
+            request.app.state.conn,
+            request.path_params["ranking_run_id"],
+            request.path_params["ranking_candidate_id"],
+            review_state=str(payload.get("review_state", "")),
+            reviewed_by=auth.bind_agent_id(str(payload.get("reviewed_by", "api:review")), request),
+            review_note=str(payload.get("review_note", "")),
+        )
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result)
+
+
+async def inferences(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        retrieval_ids = payload.get("retrieval_ids", [])
+        if not isinstance(retrieval_ids, list) or not all(isinstance(item, str) for item in retrieval_ids):
+            return JSONResponse({"error": "retrieval_ids must be a list of strings"}, status_code=400)
+        if auth.is_authenticated(request):
+            identity = auth.request_identity(request)
+            if any((record := retrieval_log.get_retrieval(request.app.state.conn, item)) is None or record.agent_id != identity for item in retrieval_ids):
+                return JSONResponse({"error": "retrieval access denied"}, status_code=404)
+        result = inference.create_inference(
+            request.app.state.conn,
+            str(payload.get("question", "")),
+            retrieval_ids,
+            created_by=auth.bind_agent_id(str(payload.get("created_by", "api:inference")), request),
+            project_id=str(payload["project_id"]) if payload.get("project_id") else None,
+            ranking_run_id=str(payload["ranking_run_id"]) if payload.get("ranking_run_id") else None,
+            max_insights=int(payload.get("max_insights", 10)),
+            evidence_records=payload.get("evidence_records") if isinstance(payload.get("evidence_records"), list) else None,
+        )
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result, status_code=201)
+
+
+async def inference_detail(request: Request) -> JSONResponse:
+    result = inference.get_inference(request.app.state.conn, request.path_params["inference_run_id"])
+    if result is None:
+        return JSONResponse({"error": "inference run not found"}, status_code=404)
+    return JSONResponse(result)
+
+
+async def inference_flush(request: Request) -> JSONResponse:
+    try:
+        result = inference.flush_parser_chunks(
+            request.app.state.conn, request.path_params["inference_run_id"]
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    return JSONResponse(result)
+
+
+async def parser_parse(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        encoded = payload.get("content_base64", "")
+        if not isinstance(encoded, str) or not encoded:
+            return JSONResponse({"error": "content_base64 is required"}, status_code=400)
+        result = document_parser.create_parser_run(
+            request.app.state.conn, base64.b64decode(encoded, validate=True),
+            str(payload.get("filename", "document.pdf")), auth.request_identity(request), str(payload.get("project_id")) if payload.get("project_id") else None,
+        )
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    return JSONResponse(result, status_code=201)
+
+
+async def parser_detail(request: Request) -> JSONResponse:
+    try:
+        result = document_parser.assert_run_access(request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request))
+    except ValueError:
+        return JSONResponse({"error": "parser run not found"}, status_code=404)
+    return JSONResponse(result)
+
+
+async def project_parser_runs(request: Request) -> JSONResponse:
+    try:
+        result = document_parser.list_parser_runs(request.app.state.conn, request.path_params["project_id"], auth.request_identity(request))
+    except ValueError:
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    return JSONResponse({"parser_runs": result})
+
+
+async def parser_download(request: Request) -> Response:
+    try:
+        result = document_parser.assert_run_access(request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request))
+    except ValueError:
+        return JSONResponse({"error": "parser run not found"}, status_code=404)
+    payload = json.dumps(result, indent=2, sort_keys=True).encode("utf-8")
+    filename = result["filename"].rsplit(".", 1)[0] + ".parsed.json"
+    return Response(payload, media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+async def parser_flush(request: Request) -> JSONResponse:
+    try:
+        result = document_parser.flush_parser_run(request.app.state.conn, document_parser.assert_run_access(request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request))["parser_run_id"])
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    return JSONResponse(result)
 
 
 async def verify(request: Request) -> JSONResponse:
@@ -399,12 +733,13 @@ async def verify(request: Request) -> JSONResponse:
 
 
 async def projects(request: Request) -> JSONResponse:
+    owner_id = auth.bind_agent_id("anonymous", request)
     if request.method == "GET":
-        return JSONResponse({"projects": workspace.list_projects(request.app.state.conn)})
+        return JSONResponse({"projects": workspace.list_projects(request.app.state.conn, owner_id)})
     try:
         payload = await request.json()
         project = workspace.create_project(
-            request.app.state.conn, str(payload.get("name", "")), str(payload.get("description", ""))
+            request.app.state.conn, str(payload.get("name", "")), str(payload.get("description", "")), owner_id
         )
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -413,20 +748,46 @@ async def projects(request: Request) -> JSONResponse:
 
 async def project_report(request: Request):
     report = workspace.get_project_report(
-        request.app.state.conn, request.path_params["project_id"]
+        request.app.state.conn, request.path_params["project_id"], auth.bind_agent_id("anonymous", request)
     )
     if report is None:
         return JSONResponse({"error": "project not found"}, status_code=404)
-    if request.query_params.get("format") == "markdown":
-        return PlainTextResponse(workspace.render_project_markdown(report), media_type="text/markdown")
+    format_name = request.query_params.get("format", "json").lower()
+    if format_name == "markdown":
+        markdown = workspace.render_project_markdown(report)
+        exports.record_export(request.app.state.conn, request.path_params["project_id"], format_name, markdown.encode(), auth.bind_agent_id("api:export", request))
+        return PlainTextResponse(markdown, media_type="text/markdown", headers={"Content-Disposition": "attachment; filename=biolab-report.md"})
+    if format_name == "pdf":
+        content = exports.markdown_to_pdf(workspace.render_project_markdown(report))
+        exports.record_export(request.app.state.conn, request.path_params["project_id"], format_name, content, auth.bind_agent_id("api:export", request))
+        return Response(content, media_type="application/pdf", headers={"Content-Disposition": "attachment; filename=biolab-report.pdf"})
     return JSONResponse(report)
+
+
+async def save_reviewed_project_evidence(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        candidate_ids = payload.get("candidate_ids", [])
+        if not isinstance(candidate_ids, list) or not all(isinstance(item, str) for item in candidate_ids):
+            return JSONResponse({"error": "candidate_ids must be a list of strings"}, status_code=400)
+        result = workspace.save_reviewed_candidates(
+            request.app.state.conn, request.path_params["project_id"],
+            str(payload.get("ranking_run_id", "")), candidate_ids,
+            auth.bind_agent_id("anonymous", request), str(payload.get("override_note", "")),
+        )
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result, status_code=201)
 
 
 async def collections(request: Request) -> JSONResponse:
     if request.method == "GET":
+        project_id = request.query_params.get("project_id")
+        if project_id and auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, project_id, auth.request_identity(request)):
+            return JSONResponse({"error": "project not found"}, status_code=404)
         return JSONResponse({
             "collections": workspace.list_collections(
-                request.app.state.conn, request.query_params.get("project_id")
+                request.app.state.conn, project_id
             )
         })
     try:
@@ -436,6 +797,7 @@ async def collections(request: Request) -> JSONResponse:
             str(payload.get("project_id", "")),
             str(payload.get("name", "")),
             str(payload.get("description", "")),
+            auth.request_identity(request),
         )
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -448,12 +810,17 @@ async def collection_detail(request: Request) -> JSONResponse:
     )
     if collection is None:
         return JSONResponse({"error": "collection not found"}, status_code=404)
+    if auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, collection["project_id"], auth.request_identity(request)):
+        return JSONResponse({"error": "collection not found"}, status_code=404)
     return JSONResponse(collection)
 
 
 async def collection_items(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
+        collection = workspace.get_collection(request.app.state.conn, request.path_params["collection_id"])
+        if collection is None or (auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, collection["project_id"], auth.request_identity(request))):
+            return JSONResponse({"error": "collection not found"}, status_code=404)
         item = workspace.add_collection_item(
             request.app.state.conn,
             request.path_params["collection_id"],
@@ -468,14 +835,19 @@ async def collection_items(request: Request) -> JSONResponse:
 
 async def watches(request: Request) -> JSONResponse:
     if request.method == "GET":
+        project_id = request.query_params.get("project_id")
+        if project_id and auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, project_id, auth.request_identity(request)):
+            return JSONResponse({"error": "project not found"}, status_code=404)
         return JSONResponse({
             "watches": workspace.list_watches(
-                request.app.state.conn, request.query_params.get("project_id")
+                request.app.state.conn, project_id
             )
         })
     try:
         payload = await request.json()
         agent_id = auth.bind_agent_id(str(payload.get("agent_id", "api:watch")), request)
+        if auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, str(payload.get("project_id", "")), auth.request_identity(request)):
+            return JSONResponse({"error": "project not found"}, status_code=404)
         watch = workspace.create_watch(
             request.app.state.conn,
             str(payload.get("project_id", "")),
@@ -510,6 +882,8 @@ async def watch_events(request: Request) -> JSONResponse:
 async def claims(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
+        if auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, str(payload.get("project_id", "")), auth.request_identity(request)):
+            return JSONResponse({"error": "project not found"}, status_code=404)
         claim = workspace.create_claim(
             request.app.state.conn,
             str(payload.get("project_id", "")),
@@ -523,6 +897,9 @@ async def claims(request: Request) -> JSONResponse:
 async def claim_evidence(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
+        claim = workspace.trace_claim(request.app.state.conn, request.path_params["claim_id"])
+        if claim is None or (auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, claim["project_id"], auth.request_identity(request))):
+            return JSONResponse({"error": "claim not found"}, status_code=404)
         link = workspace.link_claim_evidence(
             request.app.state.conn,
             request.path_params["claim_id"],
@@ -539,6 +916,8 @@ async def claim_evidence(request: Request) -> JSONResponse:
 async def claim_trace(request: Request) -> JSONResponse:
     result = workspace.trace_claim(request.app.state.conn, request.path_params["claim_id"])
     if result is None:
+        return JSONResponse({"error": "claim not found"}, status_code=404)
+    if auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, result["project_id"], auth.request_identity(request)):
         return JSONResponse({"error": "claim not found"}, status_code=404)
     return JSONResponse(result)
 
@@ -591,10 +970,22 @@ def api_routes() -> list[Route]:
         Route("/openapi.json", openapi),
         Route("/metrics", metrics),
         Route("/v1/evidence/search", search, methods=["POST"]),
+        Route("/v1/rankings", rankings, methods=["POST"]),
+        Route("/v1/rankings/{ranking_run_id}", ranking_detail),
+        Route("/v1/rankings/{ranking_run_id}/candidates/{ranking_candidate_id}/review", ranking_review, methods=["POST"]),
+        Route("/v1/inferences", inferences, methods=["POST"]),
+        Route("/v1/inferences/{inference_run_id}", inference_detail),
+        Route("/v1/inferences/{inference_run_id}/flush", inference_flush, methods=["POST"]),
+        Route("/v1/parser/parse", parser_parse, methods=["POST"]),
+        Route("/v1/projects/{project_id}/parser-runs", project_parser_runs),
+        Route("/v1/parser/runs/{parser_run_id}", parser_detail),
+        Route("/v1/parser/runs/{parser_run_id}/flush", parser_flush, methods=["POST"]),
+        Route("/v1/parser/runs/{parser_run_id}/download", parser_download),
         Route("/v1/retrievals/{retrieval_id}", get_retrieval),
         Route("/v1/verify", verify),
         Route("/v1/projects", projects, methods=["GET", "POST"]),
         Route("/v1/projects/{project_id}/report", project_report),
+        Route("/v1/projects/{project_id}/save-reviewed", save_reviewed_project_evidence, methods=["POST"]),
         Route("/v1/collections", collections, methods=["GET", "POST"]),
         Route("/v1/collections/{collection_id}", collection_detail),
         Route("/v1/collections/{collection_id}/items", collection_items, methods=["POST"]),

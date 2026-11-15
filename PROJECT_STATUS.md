@@ -27,6 +27,33 @@ it does not validate scientific conclusions or provide clinical advice.
 - A BioClaw skill and zero-dependency REST client.
 - A2A Agent Card and JSON-RPC task adapter.
 - Unified Vercel deployment for MCP, REST, dashboard, health, OpenAPI, and A2A.
+- Deterministic ranking v1 for preserved retrievals, including stored score
+  components, matched terms, missing facets, reason codes, REST routes, and MCP
+  tools. Ranking is query-fit evidence triage, not scientific validation.
+- Dashboard review queue for automatically ranked results, with top-five score
+  explanations and accepted/rejected/conflicting review decisions persisted by
+  ranking candidate ID.
+- Citation-safe grounded extraction from preserved titles and abstracts, with
+  stored parser chunks, exact citation spans, excerpt hashes, inspectable
+  inference runs, and an explicit flush operation for temporary parser data.
+- Server-side JSON/Markdown/PDF report exports with SHA-256 checksums and export
+  records, plus A2A dispatch for ranking, grounded insights, and project reports.
+- Project owner and organization-member schema with service-layer project
+  listing/report checks; hosted multi-organization deployment still requires
+  authenticated keys and durable Turso storage.
+- Atomic reviewed-evidence save path from ranking candidates into a project
+  collection; unreviewed candidates are rejected unless an explicit override
+  note is supplied.
+- Authenticated REST reads and writes now enforce retrieval ownership and
+  project/collection/watch/claim access at the service boundary; anonymous mode
+  remains an explicitly limited demo policy.
+- DeepSeek-compatible grounded generation and optional cloud pgvector RAG are
+  wired behind environment configuration, with citation validation rejecting
+  unsupported retrieval IDs or source spans. The local extractor remains an
+  explicit offline fallback.
+- Hugging Face parser adapter now accepts PDF content, persists page-aware
+  blocks with bounding boxes and hashes, exposes REST/MCP inspection, and
+  flushes disposable parsed blocks separately from claims.
 - Offline demo, integrity verification, package metadata, and test coverage.
 
 ## Architecture boundaries

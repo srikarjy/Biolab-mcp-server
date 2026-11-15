@@ -42,6 +42,9 @@ server = [
 turso = [
     "libsql>=0.1.11",
 ]
+pgvector = [
+    "psycopg[binary]>=3.2",
+]
 
 [project.entry-points]
 console_scripts = { biolab = "biolab.cli:main" }

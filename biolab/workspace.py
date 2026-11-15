@@ -1,5 +1,6 @@
 """Scientist projects, evidence collections, and saved evidence watches."""
 
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime
@@ -16,7 +17,11 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def create_project(conn: Any, name: str, description: str = "") -> dict:
+def _organization_id(owner_id: str) -> str:
+    return "org_" + hashlib.sha256(owner_id.encode("utf-8")).hexdigest()[:24]
+
+
+def create_project(conn: Any, name: str, description: str = "", owner_id: str = "local") -> dict:
     if not name.strip():
         raise ValueError("project name must not be empty")
     project = {
@@ -24,30 +29,60 @@ def create_project(conn: Any, name: str, description: str = "") -> dict:
         "name": name.strip(),
         "description": description.strip(),
         "created_at": _now(),
+        "owner_id": owner_id,
+        "organization_id": _organization_id(owner_id),
     }
+    organization_id = project["organization_id"]
     conn.execute(
-        "INSERT INTO projects (project_id, name, description, created_at) VALUES (?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO organizations (organization_id, name, created_by, created_at) VALUES (?, ?, ?, ?)",
+        (organization_id, f"{owner_id} workspace", owner_id, project["created_at"]),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO organization_members (organization_id, member_id, role, created_at) VALUES (?, ?, ?, ?)",
+        (organization_id, owner_id, "owner", project["created_at"]),
+    )
+    conn.execute(
+        "INSERT INTO projects (project_id, name, description, created_at, owner_id, organization_id) VALUES (?, ?, ?, ?, ?, ?)",
         tuple(project.values()),
     )
     conn.commit()
     return project
 
 
-def list_projects(conn: Any) -> list[dict]:
+def list_projects(conn: Any, owner_id: str | None = None) -> list[dict]:
+    where = "WHERE owner_id = ?" if owner_id else ""
+    params = (owner_id,) if owner_id else ()
     rows = conn.execute(
-        "SELECT project_id, name, description, created_at FROM projects ORDER BY created_at DESC"
+        f"SELECT project_id, name, description, created_at, owner_id, organization_id FROM projects {where} ORDER BY created_at DESC",
+        params,
     ).fetchall()
     return [
-        {"project_id": row[0], "name": row[1], "description": row[2], "created_at": row[3]}
+        {"project_id": row[0], "name": row[1], "description": row[2], "created_at": row[3], "owner_id": row[4], "organization_id": row[5]}
         for row in rows
     ]
 
 
-def create_collection(conn: Any, project_id: str, name: str, description: str = "") -> dict:
+def has_project_access(conn: Any, project_id: str, owner_id: str) -> bool:
+    row = conn.execute(
+        "SELECT owner_id, organization_id FROM projects WHERE project_id = ?", (project_id,)
+    ).fetchone()
+    if row is None:
+        return False
+    if row[0] == owner_id:
+        return True
+    return conn.execute(
+        "SELECT 1 FROM organization_members WHERE organization_id = ? AND member_id = ?",
+        (row[1], owner_id),
+    ).fetchone() is not None
+
+
+def create_collection(conn: Any, project_id: str, name: str, description: str = "", owner_id: str | None = None) -> dict:
     if not name.strip():
         raise ValueError("collection name must not be empty")
     if conn.execute("SELECT 1 FROM projects WHERE project_id = ?", (project_id,)).fetchone() is None:
         raise ValueError("project not found")
+    if owner_id is not None and not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
     collection = {
         "collection_id": str(uuid.uuid4()),
         "project_id": project_id,
@@ -64,12 +99,65 @@ def create_collection(conn: Any, project_id: str, name: str, description: str = 
     return collection
 
 
-def list_collections(conn: Any, project_id: str | None = None) -> list[dict]:
-    where = "WHERE project_id = ?" if project_id else ""
-    params = (project_id,) if project_id else ()
+def save_reviewed_candidates(
+    conn: Any, project_id: str, ranking_run_id: str, candidate_ids: list[str],
+    owner_id: str | None = None, override_note: str = "",
+) -> dict:
+    """Atomically save accepted ranking candidates into a project collection."""
+    if owner_id is not None and not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
+    if not candidate_ids:
+        raise ValueError("candidate_ids must not be empty")
     rows = conn.execute(
-        f"""SELECT collection_id, project_id, name, description, created_at
-            FROM evidence_collections {where} ORDER BY created_at""",
+        """SELECT ranking_candidate_id, retrieval_id, review_state, review_note, rank
+           FROM ranking_candidates WHERE ranking_run_id = ? AND ranking_candidate_id IN ({})""".format(
+            ",".join("?" for _ in candidate_ids)
+        ),
+        (ranking_run_id, *candidate_ids),
+    ).fetchall()
+    if len(rows) != len(set(candidate_ids)):
+        raise ValueError("one or more ranking candidates were not found in this run")
+    rejected = [row[0] for row in rows if row[2] != "accepted" and not override_note.strip()]
+    if rejected:
+        raise ValueError("only accepted candidates can be saved without override_note")
+    collection_row = conn.execute(
+        "SELECT collection_id FROM evidence_collections WHERE project_id = ? AND name = ?",
+        (project_id, "Reviewed ranking evidence"),
+    ).fetchone()
+    if collection_row is None:
+        collection = create_collection(conn, project_id, "Reviewed ranking evidence", "Saved from a reviewed ranking run", owner_id)
+        collection_id = collection["collection_id"]
+    else:
+        collection_id = collection_row[0]
+    saved: list[str] = []
+    try:
+        for _candidate_id, retrieval_id, _review_state, review_note, rank in rows:
+            note = override_note.strip() or review_note or f"Accepted from rank {rank}"
+            conn.execute(
+                """INSERT INTO collection_items (collection_id, retrieval_id, note, relevance, added_at)
+                   VALUES (?, ?, ?, 'relevant', ?)
+                   ON CONFLICT(collection_id, retrieval_id) DO UPDATE SET note=excluded.note, relevance='relevant'""",
+                (collection_id, retrieval_id, note, _now()),
+            )
+            saved.append(retrieval_id)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    return {"project_id": project_id, "ranking_run_id": ranking_run_id, "collection_id": collection_id, "saved_retrieval_ids": saved, "saved_count": len(saved)}
+
+
+def list_collections(conn: Any, project_id: str | None = None, owner_id: str | None = None) -> list[dict]:
+    where = "WHERE ec.project_id = ?" if project_id else ""
+    params: tuple[str, ...] = (project_id,) if project_id else ()
+    if owner_id:
+        where += " AND " if where else "WHERE "
+        where += "p.owner_id = ?"
+        params += (owner_id,)
+    rows = conn.execute(
+        f"""SELECT ec.collection_id, ec.project_id, ec.name, ec.description, ec.created_at
+            FROM evidence_collections ec JOIN projects p ON p.project_id = ec.project_id
+            {where} ORDER BY ec.created_at""",
         params,
     ).fetchall()
     return [
@@ -160,9 +248,12 @@ def create_watch(
     query_text: str,
     agent_id: str,
     max_results: int = 10,
+    owner_id: str | None = None,
 ) -> dict:
     if conn.execute("SELECT 1 FROM projects WHERE project_id = ?", (project_id,)).fetchone() is None:
         raise ValueError("project not found")
+    if owner_id is not None and not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
     if source not in evidence.SUPPORTED_SOURCES:
         raise ValueError("unsupported watch source")
     if not query_text.strip() or not agent_id.strip() or not 1 <= max_results <= evidence.MAX_RESULTS_CAP:
@@ -197,13 +288,17 @@ def create_watch(
     return watch
 
 
-def list_watches(conn: Any, project_id: str | None = None) -> list[dict]:
-    where = "WHERE project_id = ?" if project_id else ""
-    params = (project_id,) if project_id else ()
+def list_watches(conn: Any, project_id: str | None = None, owner_id: str | None = None) -> list[dict]:
+    where = "WHERE ew.project_id = ?" if project_id else ""
+    params: tuple[str, ...] = (project_id,) if project_id else ()
+    if owner_id:
+        where += " AND " if where else "WHERE "
+        where += "p.owner_id = ?"
+        params += (owner_id,)
     rows = conn.execute(
-        f"""SELECT watch_id, project_id, source, query_text, agent_id, max_results,
-                   active, created_at, last_checked_at
-            FROM evidence_watches {where} ORDER BY created_at""",
+        f"""SELECT ew.watch_id, ew.project_id, ew.source, ew.query_text, ew.agent_id, ew.max_results,
+                       ew.active, ew.created_at, ew.last_checked_at
+            FROM evidence_watches ew JOIN projects p ON p.project_id = ew.project_id {where} ORDER BY ew.created_at""",
         params,
     ).fetchall()
     return [
@@ -306,9 +401,11 @@ def list_watch_events(conn: Any, watch_id: str) -> list[dict]:
     ]
 
 
-def create_claim(conn: Any, project_id: str, claim_text: str) -> dict:
+def create_claim(conn: Any, project_id: str, claim_text: str, owner_id: str | None = None) -> dict:
     if conn.execute("SELECT 1 FROM projects WHERE project_id = ?", (project_id,)).fetchone() is None:
         raise ValueError("project not found")
+    if owner_id is not None and not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
     if not claim_text.strip():
         raise ValueError("claim must not be empty")
     claim = {
@@ -396,9 +493,11 @@ def trace_claim(conn: Any, claim_id: str) -> dict | None:
     }
 
 
-def get_project_report(conn: Any, project_id: str) -> dict | None:
+def get_project_report(conn: Any, project_id: str, owner_id: str | None = None) -> dict | None:
+    if owner_id is not None and not has_project_access(conn, project_id, owner_id):
+        return None
     project_row = conn.execute(
-        "SELECT project_id, name, description, created_at FROM projects WHERE project_id = ?",
+        "SELECT project_id, name, description, created_at, owner_id, organization_id FROM projects WHERE project_id = ?",
         (project_id,),
     ).fetchone()
     if project_row is None:
@@ -415,13 +514,28 @@ def get_project_report(conn: Any, project_id: str) -> dict | None:
            FROM evidence_watches WHERE project_id = ? ORDER BY created_at""",
         (project_id,),
     ).fetchall()
+    parser_runs = conn.execute(
+        """SELECT parser_run_id, filename, parser_model, source_hash, status,
+                  block_count, created_by, created_at
+           FROM parser_runs WHERE project_id = ? ORDER BY created_at DESC""",
+        (project_id,),
+    ).fetchall()
     return {
         "project": {
             "project_id": project_row[0], "name": project_row[1],
             "description": project_row[2], "created_at": project_row[3],
+            "owner_id": project_row[4], "organization_id": project_row[5],
         },
         "collections": [get_collection(conn, row[0]) for row in collection_ids],
         "claims": [trace_claim(conn, row[0]) for row in claim_ids],
+        "parser_runs": [
+            {
+                "parser_run_id": row[0], "filename": row[1], "parser_model": row[2],
+                "source_hash": row[3], "status": row[4], "block_count": row[5],
+                "created_by": row[6], "created_at": row[7],
+            }
+            for row in parser_runs
+        ],
         "watches": [
             {
                 "watch_id": row[0], "source": row[1], "query": row[2],
@@ -486,6 +600,16 @@ def render_project_markdown(report: dict) -> str:
                 f"  - Recorded events: {len(watch['events'])}",
             ]
         )
+    lines.extend(["## Parsed documents", ""])
+    for parsed in report.get("parser_runs", []):
+        lines.extend([
+            f"- **{parsed['filename']}** — `{parsed['parser_run_id']}`",
+            f"  - Status: {parsed['status']}; blocks: {parsed['block_count']}",
+            f"  - Source hash: `{parsed['source_hash']}`",
+        ])
+    if not report.get("parser_runs"):
+        lines.append("No parsed documents.")
+    lines.append("")
     lines.extend(
         [
             "",

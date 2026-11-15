@@ -1,41 +1,57 @@
 # Biolab MCP Server
 
-[![Python Version](https://img.shields.io/badge/python-3.11%2B-blue)](https://python.org)
-[![Go Version](https://img.shields.io/badge/go-1.23%2B-00ADD8)](https://golang.org)
-[![MCP](https://img.shields.io/badge/MCP-1.28.1-purple)](https://modelcontextprotocol.io)
-[![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
-[![PyPI](https://img.shields.io/pypi/v/biolab-mcp)](https://pypi.org/project/biolab-mcp/)
-[![Docker](https://img.shields.io/badge/docker-ghcr.io%2Fsrikarjy%2Fbiolab--mcp-blue)](https://github.com/srikarjy/biolab-mcp-server/pkgs/container/biolab-mcp)
+Biolab is a local-first scientific evidence workspace for Python and Go. It
+retrieves records from life-science sources, preserves the returned payload and
+metadata, and makes each retrieval inspectable through MCP, REST, A2A, CLI, and
+a small dashboard.
 
-> *"AI agents querying biological databases leave no audit trail. Six months later, nobody can answer: what exact query returned this result, when, and was that paper peer-reviewed at the time? Biolab solves that."*
+Biolab records provenance. It does not decide that a paper is correct, prove a
+biological mechanism, rank evidence, or provide clinical advice.
 
-A **local-first scientific evidence workspace** with Python and Go clients. It sits between scientists or AI agents and PubMed, Europe PMC, ClinicalTrials.gov, UniProt, Open Targets, and bioRxiv/medRxiv. Every retrieval preserves its source response and returns a `retrieval_id`; projects, reviewed collections, evidence watches, and claim links build a traceable workflow on top.
+## What is implemented
 
-## Project Guide
+- Source adapters for PubMed, Europe PMC, ClinicalTrials.gov, UniProt, Open
+  Targets, and bioRxiv/medRxiv.
+- A retrieval log with raw responses, normalized snapshots, retrieval IDs, and
+  a hash chain.
+- Projects, reviewed collections, claims, evidence watches, and project reports.
+- Python CLI and server, Go audit-chain client, REST API, MCP tools, A2A
+  endpoint, and a browser dashboard.
+- Local SQLite storage by default, with optional Turso/libSQL storage.
+- Human-review fields that keep provenance separate from scientific validation.
 
-- [Onboarding guide](ONBOARDING.md) — architecture, request lifecycle, entry points, and conventions.
-- [TODO and verification baseline](TODO.md) — prioritized backlog with confirmed test and quality results.
-- [End-to-end user guide](docs/END_TO_END_USER_GUIDE.md) — how a person or agent connects, searches, reviews, monitors, reports, and verifies.
-- [A2A integration](docs/A2A.md) — how another agent discovers and calls Biolab through Agent2Agent.
-- [Vercel deployment](docs/VERCEL_DEPLOYMENT.md) — the non-Hugging-Face deployment path.
-- [Complex problem log](docs/COMPLEX_PROBLEM_LOG.md) — durable notes for non-trivial engineering investigations and their evidence.
-- [Project instructions](CLAUDE.md) — concise implementation and testing rules for contributors and coding agents.
+## Live demo
 
-**New to MCP?** It's an open standard that lets an AI assistant — Codex,
-ChatGPT, Claude, Cursor, and others — call external tools during a conversation.
-Add Biolab and the assistant can retrieve, preserve, organize, monitor, and cite
-scientific evidence while keeping every result inspectable later.
+The current hosted demo is:
 
-## Use It Now — No Install
-
-A unified hosted instance is available at `https://biolab-a2a.vercel.app/`. The same Vercel deployment serves the dashboard, MCP, REST, health, OpenAPI, and A2A from one domain.
-
-**Claude Code:**
-```bash
-claude mcp add --transport http biolab https://biolab-a2a.vercel.app/mcp
+```text
+https://biolab-a2a.vercel.app/
 ```
 
-**Claude Desktop / Cursor** — add this to your MCP config file:
+The deployment exposes these surfaces from one domain:
+
+| Surface | URL | Purpose |
+| --- | --- | --- |
+| Dashboard | `https://biolab-a2a.vercel.app/` | Create projects, search, inspect results, and verify the chain |
+| MCP | `https://biolab-a2a.vercel.app/mcp` | Streamable HTTP MCP endpoint |
+| REST | `https://biolab-a2a.vercel.app/v1/...` | Application and automation API |
+| OpenAPI | `https://biolab-a2a.vercel.app/openapi.json` | REST contract |
+| Agent Card | `https://biolab-a2a.vercel.app/.well-known/agent-card.json` | A2A discovery metadata |
+| A2A | `https://biolab-a2a.vercel.app/a2a` | JSON-RPC agent endpoint |
+| Health | `https://biolab-a2a.vercel.app/health` | Runtime health check |
+| Metrics | `https://biolab-a2a.vercel.app/metrics` | Runtime metrics |
+
+### Connect an MCP client
+
+Claude Code:
+
+```bash
+claude mcp add --transport http biolab \
+  https://biolab-a2a.vercel.app/mcp
+```
+
+Claude Desktop, Cursor, or another compatible client:
+
 ```json
 {
   "mcpServers": {
@@ -45,430 +61,349 @@ claude mcp add --transport http biolab https://biolab-a2a.vercel.app/mcp
   }
 }
 ```
-(Add `"headers": {"Authorization": "Bearer <your key>"}` alongside `"url"` once you have a key — see the rate-limit note below.)
 
-The 0.4 server exposes unified search, source-specific search, standard `search`/`fetch`, retrieval inspection, projects, collections, watches, claims, and reports. Every retrieval is written to a hash-chained audit trail you can inspect later (see [Audit Trail Schema](#audit-trail-schema-v2) below).
+The hosted demo allows anonymous access for low-volume use. It is not a
+production multi-tenant service. Without Turso variables, Vercel uses an
+ephemeral `/tmp` database; projects and evidence can disappear when the
+serverless instance is replaced.
 
-For cross-source research, `search_evidence` searches PubMed, Europe PMC,
-ClinicalTrials.gov, UniProt, and Open Targets through one call while preserving
-explicit results and errors for each source.
+## Why preserve retrievals?
 
-Also listed on the [official MCP Registry](https://registry.modelcontextprotocol.io) and [Smithery](https://smithery.ai/servers/srikarjy025/biolab-mcp) if you'd rather discover/install it from there.
+An agent may later need to answer:
 
-**A note on rate limits.** The hosted server is shared and stays open — no signup required for casual use — but callers with no API key share one small, low-throughput budget (1 req/s to PubMed) so no single anonymous user can starve everyone else. If you're doing more than a handful of queries, ask for a key (below) and you get your own isolated, higher budget instead.
+- Which exact query was sent?
+- Which source returned the record, and when?
+- What raw response and normalized fields did the agent receive?
+- Which evidence was reviewed or linked to a claim?
+- Has the local audit chain been altered since retrieval?
 
-**Getting a key:**
-```
-Authorization: Bearer <your key>
-```
-Add that header in your client's MCP config (Claude Code: `claude mcp add --transport http biolab <url> --header "Authorization: Bearer <key>"`). Keys are issued with `biolab keys create <label>` — see [Managing API Keys](#managing-api-keys) below if you're running your own instance; otherwise ask the maintainer for one.
+Biolab returns a `retrieval_id` and stores the source response before returning
+the result. A later reviewer can inspect the record instead of relying on an
+untraceable summary.
 
-Want to run your own copy instead (local dev, your own storage, self-hosting)? Keep reading.
+## Audit boundary
 
-## The Problem
+The retrieval log is hash-chained: each record includes the previous record's
+hash and the current record's audited fields. Verification can identify a
+broken link or altered row.
 
-A drug discovery team uses an AI agent to research gene targets. The agent queries PubMed 200 times over three days and surfaces a paper claiming gene X is upregulated in pancreatic cancer. A scientist makes a decision based on that. Six months later, during FDA submission:
+This is tamper evidence, not an immutable ledger. An operator still needs
+access control, backups, external anchors, and review procedures for a serious
+production deployment. Biolab does not validate the truth of a source response
+or a claim derived from it.
 
-- What exact query returned that paper?
-- What date was it retrieved?
-- Was it peer-reviewed at retrieval time, or a preprint published later?
-- Did the agent summarize it accurately, or hallucinate details?
+## Local installation
 
-Without Biolab, nobody can answer any of those questions. The retrieval is invisible.
+Requirements:
 
-## What Biolab Does
-
-Biolab is an **interception and logging layer**, not a retrieval layer. It doesn't interpret evidence, rank it, or summarize it — it records what happened, verbatim, so an agent's claim can always be traced back to an unforgeable original.
-
-```
-Your AI Agent
-    ↓  MCP tool call (e.g. search_pubmed)
-Biolab MCP Server
-    ↓  HTTP
-Source API (PubMed, Europe PMC, ClinicalTrials.gov, bioRxiv/medRxiv)
-    ↓  paper
-Biolab writes a hash-chained retrieval record to the audit database
-    ↓  paper + retrieval_id
-Back to your agent
-```
-
-The agent gets the paper it asked for. Biolab gets a permanent, queryable, tamper-evident record of exactly what happened.
-
-## Sources Supported
-
-| Source | MCP Tool | CLI Command | Notes |
-|--------|----------|-------------|-------|
-| **PubMed** | `search_pubmed` | `biolab search` | E-utilities, full XML stored |
-| **Europe PMC** | `search_europepmc` | `biolab search-europepmc` | Free, indexes bioRxiv/medRxiv |
-| **ClinicalTrials.gov** | `search_clinicaltrials` | `biolab search-clinicaltrials` | API v2, condition-based search |
-| **UniProt** | `search_evidence` | `biolab evidence` | Protein records and sequences |
-| **Open Targets** | `search_evidence` | `biolab evidence` | Target, disease, and drug entities via GraphQL |
-| **bioRxiv/medRxiv** | `search_biorxiv` | `biolab search-biorxiv` | Date-range pagination (API limit) |
-
-All sources share a **single audit database** (SQLite locally, or [Turso](https://turso.tech) — a hosted, SQLite-compatible database — in production) with one source-agnostic schema.
-
-## Build It Yourself
-
-You don't need to know Python or Go to get this running locally — just follow these steps in order. All commands are run in a terminal.
-
-### Prerequisites
-
-- **Python 3.11 or newer** — check with `python3 --version`. Get it from [python.org](https://www.python.org/downloads/) if you don't have it.
-- **Git** — to download (clone) the code. Check with `git --version`.
-
-That's genuinely it for the Python path — no database server to install, no API keys required (PubMed works anonymously, just at a lower rate limit).
-
-### 1. Get the code
+- Python 3.11 or newer
+- Git
 
 ```bash
 git clone https://github.com/srikarjy/biolab-mcp-server.git
 cd biolab-mcp-server
+python3 -m venv .venv
+source .venv/bin/activate          # Windows: .venv\\Scripts\\activate
+pip install -e ".[dev]"
 ```
 
-### 2. Install it
-
-```bash
-python3 -m venv .venv          # creates an isolated Python environment
-source .venv/bin/activate      # on Windows: .venv\Scripts\activate
-pip install -e ".[dev]"        # installs the package + test tools
-# Add the optional remote Turso driver only if needed: pip install -e ".[turso]"
-```
-
-### 3. Try it
+Run the CLI demo:
 
 ```bash
 biolab demo --query "BRCA1 pancreatic cancer"
 ```
 
-This searches PubMed for real, stores every result in a local `biolab.db` file (created automatically, no setup needed), and prints back the `retrieval_id` for each paper — the same ID an AI agent would get back over MCP.
-
-### 4. Run the test suite (optional, confirms everything works)
+Run the private local dashboard and REST API:
 
 ```bash
-pytest -m "not live and not benchmark" -v
+biolab web
 ```
 
-Run `pytest -m live -v` separately when network access and local socket binding
-are available. Those tests exercise real PubMed, Europe PMC, ClinicalTrials.gov,
-and bioRxiv services; the default command stays deterministic and offline.
+Open `http://127.0.0.1:8000`.
 
-### 5. Run it as an MCP server (what an AI agent actually connects to)
+Run the MCP server directly:
 
 ```bash
 python -m biolab.server
 ```
 
-This starts an HTTP server on `http://localhost:8000/mcp` — point Claude Desktop, Claude Code, or Cursor at that URL exactly like in [Use It Now](#use-it-now--no-install), just with `localhost:8000` instead of the hosted URL.
+The MCP endpoint is then `http://127.0.0.1:8000/mcp`.
 
-### 6. Build the Docker image (optional)
+## First evidence pass
 
-If you'd rather not install Python locally at all:
-
-```bash
-docker build -f space/Dockerfile -t biolab-mcp .
-docker run -p 8000:8000 biolab-mcp
-```
-
-(Storage defaults to an ephemeral file inside the container unless you set `TURSO_DATABASE_URL`/`TURSO_AUTH_TOKEN` — see [Environment Variables](#environment-variables) below.)
-
-### Prefer a pre-built release?
+Single-source PubMed search:
 
 ```bash
-pipx install biolab-mcp      # or: pip install biolab-mcp
-```
-
-```bash
-# Or the Go binary, no Python required at all:
-curl -L https://github.com/srikarjy/biolab-mcp-server/releases/latest/download/biolab_darwin_arm64.tar.gz | tar xz
-./biolab search "BRCA1 pancreatic cancer" --max 3
-```
-
-## Usage
-
-### CLI (Scientist-Friendly)
-```bash
-# Search several evidence sources in one audited workflow
-biolab evidence "KRAS pancreatic cancer" \
-  --sources pubmed,europepmc,clinicaltrials,uniprot,opentargets --max 5
-
-# Search PubMed
 biolab search "BRCA1 pancreatic cancer" --max 5
+```
 
-# Search Europe PMC
-biolab search-europepmc "BRCA1 pancreatic cancer" --max 5
+Multi-source search:
 
-# Search ClinicalTrials.gov
-biolab search-clinicaltrials "pancreatic cancer" --max 5
+```bash
+biolab evidence "KRAS pancreatic cancer" \
+  --sources pubmed,europepmc,clinicaltrials,uniprot,opentargets \
+  --max 5
+```
 
-# List bioRxiv preprints (no free-text search - API limitation)
-biolab search-biorxiv neuroscience --max 10
-biolab search-biorxiv all --server medrxiv --max 10
+Inspect a preserved result and verify the chain:
 
-# Retrieve full audit record
+```bash
 biolab get <retrieval_id>
-
-# List recent retrievals
-biolab list --source pubmed --limit 10
-
-# Export for analysis
-biolab export evidence.jsonl --source clinicaltrials
-
-# Verify the complete tamper-evident audit chain
 biolab verify --db biolab.db
+```
 
-# Run demo
-biolab demo --query "BRCA1 pancreatic cancer"
+Rank preserved results with an explainable, deterministic scorer through REST:
 
-# Run the offline portfolio demo (no network or scientific claims)
-biolab portfolio-demo
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/rankings \
+  -H 'content-type: application/json' \
+  -d '{"question":"KRAS randomized trial", "retrieval_ids":["<retrieval_id>"]}'
+```
 
-# Run the real end-to-end scientist workflow against a local server
-python scripts/scientist_workflow_demo.py --url http://127.0.0.1:8000
+The response contains the rank, total score, component scores, matched terms,
+missing facets, and reason codes. The score describes fit to the query; it is
+not a scientific truth or clinical-quality score.
 
-# Start the private local dashboard and REST API
-biolab web
-# Open http://127.0.0.1:8000
+The multi-source operation preserves source-specific results and explicit
+source errors. A returned record is preserved evidence, not an assertion that
+the result is relevant or scientifically correct.
 
-# Create a project, organize evidence, and trace a claim
-biolab projects create "KRAS target review" --description "Pancreatic cancer evidence"
+Extract citation-safe grounded insights from preserved results:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/v1/inferences \
+  -H 'content-type: application/json' \
+  -d '{"question":"KRAS pancreatic cancer", "retrieval_ids":["<retrieval_id>"], "max_insights":5}'
+```
+
+The parser is deterministic and provider-free. It extracts only sentences
+present in preserved title or abstract fields, stores exact field offsets, and
+returns a citation locator plus excerpt hash for every insight. It is an
+evidence extraction aid, not an LLM-generated conclusion or scientific
+validation. Use `GET /v1/inferences/{inference_run_id}` to inspect a run and
+`POST /v1/inferences/{inference_run_id}/flush` to remove temporary parser
+chunks while retaining derived claims and citations.
+
+## Organize reviewed evidence
+
+```bash
+biolab projects create "KRAS target review" \
+  --description "Pancreatic cancer evidence"
 biolab collections create <project_id> "Reviewed evidence"
-biolab collections add <collection_id> <retrieval_id> --relevance relevant --note "Reviewed"
+biolab collections add <collection_id> <retrieval_id> \
+  --relevance relevant --note "Reviewed by scientist"
 biolab claims create <project_id> "KRAS is a therapeutic target"
-biolab claims link <claim_id> <retrieval_id> --stance supports --assessment human_reviewed
+biolab claims link <claim_id> <retrieval_id> \
+  --stance supports --assessment human_reviewed
+biolab projects report <project_id> --output kras-report.md
+```
 
-# Monitor a source for added, removed, or revised records
+The same project report is available as JSON (default), Markdown, or a
+server-rendered PDF:
+
+```text
+GET /v1/projects/{project_id}/report
+GET /v1/projects/{project_id}/report?format=markdown
+GET /v1/projects/{project_id}/report?format=pdf
+```
+
+Exports are checksummed and recorded. PDF generation is text-focused and
+server-side, so it does not depend on browser state.
+
+The hosted demo can parse the snapshots returned by the current browser request
+even when a serverless invocation cannot see the prior ephemeral SQLite row.
+Those runs are labeled `request-context` and are not durable; configure Turso
+for durable retrievals, ranking runs, and inference history.
+
+The `human_reviewed` assessment is an explicit workflow value. It must not be
+used to imply that Biolab itself performed the review.
+
+Monitor a source over time:
+
+```bash
 biolab watches create <project_id> pubmed "KRAS pancreatic cancer"
 biolab watches run-all
-
-# Export a complete project report
-biolab projects report <project_id> --output report.md
+biolab watches events <watch_id>
 ```
 
-The dashboard binds to `127.0.0.1` by default. REST endpoints cover evidence,
-projects, collections, watches, claims, and reports. Discover them at
-`/openapi.json`; use `/health`, `/metrics`, and `/v1/verify` for operations.
-Run `biolab web --require-auth` with keys created by `biolab keys create`, or use
-`BIOLAB_REQUIRE_AUTH=true` on the unified MCP server, before exposing it remotely.
+Watch events describe source changes. They do not decide whether a change is
+scientifically important.
 
-### MCP Tools (Agent-Friendly)
-```json
-// Search any source
-{"name": "search_evidence", "arguments": {"query": "KRAS pancreatic cancer", "agent_id": "research:target-validation", "sources": ["pubmed", "europepmc", "clinicaltrials", "uniprot", "opentargets"], "max_results": 5}}
-{"name": "search_pubmed", "arguments": {"query": "BRCA1 pancreatic cancer", "agent_id": "aletheia:advocate", "max_results": 5}}
-{"name": "search_europepmc", "arguments": {"query": "BRCA1 pancreatic cancer", "agent_id": "aletheia:advocate", "max_results": 5}}
-{"name": "search_clinicaltrials", "arguments": {"query": "pancreatic cancer", "agent_id": "aletheia:advocate", "max_results": 5}}
-{"name": "search_biorxiv", "arguments": {"category": "neuroscience", "agent_id": "aletheia:advocate", "max_results": 5, "server": "biorxiv"}}
+## Supported sources
 
-// Retrieve full audit record (works for ALL sources)
-{"name": "get_retrieval", "arguments": {"retrieval_id": "uuid-from-search"}}
+| Source | Main tool or command | Stored material |
+| --- | --- | --- |
+| PubMed | `search_pubmed`, `biolab search` | E-utilities response and normalized paper fields |
+| Europe PMC | `search_europepmc`, `biolab search-europepmc` | Europe PMC response and normalized fields |
+| ClinicalTrials.gov | `search_clinicaltrials`, `biolab search-clinicaltrials` | API response and trial fields |
+| UniProt | `search_evidence`, `biolab evidence` | Protein records and normalized fields |
+| Open Targets | `search_evidence`, `biolab evidence` | Target, disease, and drug records returned by the adapter |
+| bioRxiv/medRxiv | `search_biorxiv`, `biolab search-biorxiv` | Preprint records returned by the adapter |
+
+External APIs can change, rate-limit requests, or return partial failures. The
+runtime reports those failures rather than treating them as successful evidence.
+
+## REST and A2A
+
+Important REST routes:
+
+```text
+POST /v1/evidence/search
+POST /v1/rankings
+GET  /v1/rankings/{ranking_run_id}
+POST /v1/inferences
+GET  /v1/inferences/{inference_run_id}
+POST /v1/inferences/{inference_run_id}/flush
+POST /v1/parser/parse
+GET  /v1/parser/runs/{parser_run_id}
+POST /v1/parser/runs/{parser_run_id}/flush
+GET  /v1/retrievals/{retrieval_id}
+GET  /v1/projects
+POST /v1/projects
+GET  /v1/projects/{project_id}/report
+POST /v1/collections
+GET  /v1/watches
+POST /v1/watches
+POST /v1/watches/run-all
+POST /v1/claims
+GET  /v1/claims/{claim_id}
+GET  /v1/verify
 ```
 
-### BioClaw
+For A2A clients, discover the service from:
 
-A ready-to-copy BioClaw skill is included at
-`integrations/bioclaw/biolab-evidence`. It connects BioClaw's containerized
-research assistant to the local REST API and supports cross-source search,
-retrieval inspection, and chain verification without extra Python packages.
-
-### Codex and ChatGPT
-
-- Start the complete local server with `python -m biolab.server`.
-- Copy `integrations/codex/config.toml.example` into your Codex configuration and
-  keep tool approval on `prompt` while developing.
-- The portable Agent Plugin bundle is in `plugins/biolab/` (`plugin.json`,
-  `mcp.json`, and its evidence-workspace skill). Change the remote URL in
-  `mcp.json` to your HTTPS deployment before publishing or submitting it.
-- The MCP server includes standard `search` and `fetch` knowledge tools plus the
-  richer Biolab tools. Tool annotations disclose read-only, write, external-data,
-  and idempotency behavior to clients.
-
-ChatGPT/Codex can therefore search and preserve evidence, create project state,
-run watches, and trace claims. The assistant proposes relationships; a scientist
-must use `human_reviewed` when a relationship has actually been reviewed.
-
-### REST and API gateways
-
-One `python -m biolab.server` process serves MCP at `/mcp`, the dashboard at `/`,
-and REST under `/v1`. The important routes are:
-
-| Route | Purpose |
-|---|---|
-| `POST /v1/evidence/search` | Audited multi-source search |
-| `GET /v1/retrievals/{id}` | Full preserved retrieval |
-| `GET, POST /v1/projects` | List or create projects |
-| `POST /v1/collections` | Create a reviewed collection |
-| `GET, POST /v1/watches` | List or create monitoring queries |
-| `POST /v1/watches/run-all` | Scheduled drift detection |
-| `POST /v1/claims` | Create a claim without asserting truth |
-| `GET /v1/claims/{id}` | Trace claim/evidence relationships |
-| `GET /v1/projects/{id}/report` | JSON or `?format=markdown` report |
-| `GET /openapi.json` | Gateway/API discovery document |
-
-The zero-cost Caddy/Docker example in `deploy/gateway/` adds a reverse-proxy
-boundary and persistent volume. It binds only to localhost by default. Add a real
-domain, HTTPS, backups, and organization-specific authorization before public use.
-
-### Python API
-```python
-from biolab.pubmed_client import search_and_fetch
-from biolab.retrieval_log import write_retrieval, get_retrieval
-from biolab.db import connect
-
-conn = connect("biolab.db")
-papers = search_and_fetch("BRCA1 pancreatic cancer", 3)
-for p in papers:
-    record = write_retrieval(conn, query="...", pmid=p.pmid, ...)
-    print(record.retrieval_id)
+```text
+GET  /.well-known/agent-card.json
+POST /a2a
 ```
 
-## Managing API Keys
+The A2A endpoint accepts the supported JSON-RPC task shape documented in
+[`docs/A2A.md`](docs/A2A.md).
 
-The server stays open to unauthenticated callers by design — but they all share one small, low-throughput rate-limit budget (see [Use It Now](#use-it-now--no-install)). Issuing someone a key gives them their own isolated, higher budget instead. This doesn't gate *access* — it's purely a fairness mechanism so one caller can't starve everyone else's share of PubMed's real rate limit.
+A2A `message/send` also accepts `metadata.operation` values `rank`,
+`grounded_insights`, and `project_report`; these call the same ranking,
+inference, and report services used by REST and MCP. File downloads are
+explicitly reported as unsupported in the Agent Card; request report JSON or
+use the REST PDF endpoint when the client supports binary downloads.
+
+## Storage and deployment
+
+Local deployments use SQLite:
+
+```text
+BIOLAB_DB_PATH=biolab.db
+```
+
+DeepSeek and cloud RAG are opt-in production capabilities:
+
+```text
+DEEPSEEK_API_KEY=...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
+DATABASE_URL=postgresql://...          # Postgres with pgvector enabled
+BIOLAB_EMBEDDING_API_URL=https://.../v1/embeddings
+BIOLAB_EMBEDDING_API_KEY=...
+BIOLAB_EMBEDDING_MODEL=text-embedding-3-small
+BIOLAB_EMBEDDING_DIMENSION=1536
+HF_TOKEN=...
+HF_PARSER_ENDPOINT=https://your-inference-endpoint
+HF_PARSER_MODEL=nvidia/Nemotron-3.5-Parse
+```
+
+Parse a PDF through the Hugging Face backend by sending base64 content to
+`POST /v1/parser/parse`. The response contains page-aware blocks with block
+types, bounding boxes, content hashes, and the selected parser model. Inspect
+it with `GET /v1/parser/runs/{parser_run_id}` and remove disposable parsed
+blocks with `POST /v1/parser/runs/{parser_run_id}/flush`. The parser endpoint
+must be a Hugging Face Inference Endpoint or Space wrapper capable of rendering
+PDF pages for the selected model.
+
+When the optional pgvector path is configured (`DATABASE_URL` or
+`PGVECTOR_DATABASE_URL`, plus `BIOLAB_EMBEDDING_API_URL` and
+`BIOLAB_EMBEDDING_API_KEY`), each non-empty parsed block is also stored in the
+separate `biolab_parser_chunks` vector table with its parser run, page number,
+block type, and text. Flushing a parser run removes both its local parsed blocks
+and its cloud vector chunks while preserving parser-run metadata and reviewed
+citations.
+
+When `DEEPSEEK_API_KEY` is present, inference uses DeepSeek’s structured
+grounded-generation path. When the database and embedding provider are also
+configured, source chunks are indexed in `biolab_evidence_chunks` and the
+question is narrowed through pgvector similarity before DeepSeek sees the
+context. Citation validation rejects claims whose retrieval ID, field, or
+quoted span cannot be matched to the supplied evidence. Without these
+variables, the dashboard uses the transparent local extractor and labels
+request-context runs as non-durable.
+
+Parsed documents can be assigned to a project folder by including `project_id`
+in `POST /v1/parser/parse`. Use `GET /v1/projects/{project_id}/parser-runs` to
+list that project’s parsed documents and `GET /v1/parser/runs/{parser_run_id}/download`
+to download the page-aware parsed JSON. Project ownership is checked at each
+read, download, and flush boundary; the raw PDF is not retained by this parser
+endpoint.
+
+For durable hosted storage, install the optional Turso dependency and configure
+both variables:
 
 ```bash
-# Issue a key — the raw key is shown once, save it immediately
-biolab keys create alice
-
-# List issued keys (never shows the raw key — only a hash is stored)
-biolab keys list
-
-# Revoke all of a label's active keys
-biolab keys revoke alice
+pip install -e ".[turso]"
+export TURSO_DATABASE_URL="libsql://your-database.turso.io"
+export TURSO_AUTH_TOKEN="your-token"
 ```
 
-The caller sends the key back as `Authorization: Bearer <key>`. By default a
-missing header uses the anonymous tier while an invalid/revoked key returns `401`.
-Set `BIOLAB_REQUIRE_AUTH=true` to reject requests without a key as well.
+The Vercel adapter installs the Turso extra, but it does not create a database
+or supply credentials. Configure `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in
+the deployment environment before treating the hosted service as durable.
 
-## Environment Variables
-
-All optional — the server runs with sensible defaults if you set none of these.
+Other useful variables:
 
 | Variable | Purpose | Default |
-|----------|---------|---------|
-| `BIOLAB_DB_PATH` | Local SQLite file path (ignored if `TURSO_DATABASE_URL` is set) | `biolab.db` |
-| `TURSO_DATABASE_URL` | Optional remote [Turso](https://turso.tech) URL; requires `pip install "biolab-mcp[turso]"` | unset (uses local file) |
-| `TURSO_AUTH_TOKEN` | Auth token for the Turso database above | unset |
-| `BIOLAB_HOST` | Host the MCP server binds to; non-loopback requires `BIOLAB_REQUIRE_AUTH=true` or `BIOLAB_ALLOW_ANONYMOUS=true` | `127.0.0.1` |
-| `BIOLAB_PORT` | Port the MCP server listens on | `8000` |
-| `BIOLAB_REQUIRE_AUTH` | Require a valid Bearer API key on MCP/REST requests | `false` |
-| `NCBI_API_KEY` | Raises the PubMed rate limit from 3 req/s to 10 req/s | unset (works fine without one) |
+| --- | --- | --- |
+| `BIOLAB_DB_PATH` | Local SQLite path | `biolab.db` |
+| `BIOLAB_ARTIFACT_DIR` | Execution artifact directory | `artifacts` |
+| `TURSO_DATABASE_URL` | Optional remote libSQL/Turso URL | unset |
+| `TURSO_AUTH_TOKEN` | Token for the Turso URL | unset |
+| `BIOLAB_HOST` | Bind address | `127.0.0.1` locally |
+| `BIOLAB_PORT` | HTTP port | `8000` |
+| `BIOLAB_REQUIRE_AUTH` | Require a valid bearer key | `false` |
+| `NCBI_API_KEY` | Higher PubMed request limit | unset |
 
-## Audit Trail Schema (v2)
+The repository includes a Vercel adapter in `app.py`, route rewrites in
+`vercel.json`, and deployment notes in
+[`docs/VERCEL_DEPLOYMENT.md`](docs/VERCEL_DEPLOYMENT.md).
 
-```sql
-CREATE TABLE retrievals (
-    retrieval_id     TEXT PRIMARY KEY,  -- UUID
-    source           TEXT NOT NULL,     -- pubmed, europepmc, trials, UniProt, Open Targets, etc.
-    external_id      TEXT NOT NULL,     -- PMID, NCT ID, DOI, etc.
-    query_text       TEXT NOT NULL,     -- exact query sent to source
-    retrieved_at     TEXT NOT NULL,     -- ISO 8601 UTC
-    agent_id         TEXT NOT NULL,     -- e.g. "aletheia:advocate"
-    source_metadata  TEXT NOT NULL,     -- JSON: source-specific fields
-    raw_response     TEXT NOT NULL,     -- verbatim XML/JSON from source
-    snapshot         TEXT NOT NULL,     -- JSON: structured fields (title, abstract, authors, journal, DOI, pub types, MeSH/conditions)
-    response_hash    TEXT NOT NULL,     -- SHA-256(prev_hash + raw_response + retrieval_id + retrieved_at)
-    prev_hash        TEXT NOT NULL      -- response_hash of the previous row — makes this a hash chain
-);
-```
+## Testing and development
 
-**Key properties:**
-- One row per paper retrieval (not per query)
-- Raw response stored verbatim — parsing bugs are recoverable
-- **Hash-chained**, not just hashed: each row's hash covers the previous row's hash too, so deleting or editing any row — even in the database directly — breaks the chain for every row after it. Call `retrieval_log.verify_chain(conn)` to check the whole log; it returns exactly which row broke, if any.
-- Background write queue serializes all writes through one path, so the chain stays consistent even under concurrent agent calls
-
-## Tamper Evidence and Execution Runtime
-
-- Retrieval rows are hash-chained over every audited column (`hash_version` 2); legacy v1 rows still verify.
-- `biolab anchor out.json [--chain retrievals|executions]` writes an HMAC-signed checkpoint of a chain head (`BIOLAB_ANCHOR_KEY`). Keep it outside the database host; `biolab verify-anchor out.json` then detects tail truncation and full rewrites that the chain alone cannot see.
-- `biolab run-tool <tool> -i '{...}'` runs a registered tool (`sequence_stats`; `mmseqs2_search` when `mmseqs` is on PATH) and seals an immutable ExecutionRecord with content-addressed artifacts. `biolab executions {list,show,verify,replay,artifact}` inspects, verifies and replays them. If the record cannot be sealed, no result is returned.
-- The Go port (`go-biolab/`) writes the same v2 chain and has `verify`, `anchor` and `verify-anchor`; hashes are byte-compatible with Python and pinned by shared test vectors. The Go port does not implement the execution runtime.
-
-## Architecture
-
-```
-biolab/
-├── cli.py                   # Search plus scientist workspace commands
-├── server.py                # Unified MCP + REST + dashboard process
-├── evidence.py              # Shared multi-source orchestration and audit persistence
-├── workspace.py             # Projects, collections, watches, claims, reports
-├── web.py                   # Local dashboard + versioned REST API
-├── db.py                    # Connection + schema (local SQLite or remote Turso)
-├── models.py                 # RetrievalRecord dataclass
-├── retrieval_log.py          # Only writer + background queue + hash chain
-├── pubmed_client.py           # PubMed E-utilities wrapper + rate limiter
-├── europepmc_client.py        # Europe PMC adapter
-├── clinicaltrials_client.py   # ClinicalTrials.gov adapter
-├── uniprot_client.py          # UniProt adapter
-├── opentargets_client.py      # Open Targets GraphQL adapter
-├── biorxiv_client.py          # bioRxiv/medRxiv adapter
-└── migrations/                # Schema migration scripts
-
-integrations/
-├── bioclaw/                   # BioClaw evidence skill and REST client
-└── codex/                     # Local MCP configuration template
-
-plugins/biolab/                # Portable Codex/ChatGPT Agent Plugin bundle
-deploy/gateway/                # Caddy + Docker Compose deployment template
-
-space/                      # Container files for self-hosted deployment
-├── Dockerfile                # Python-server-specific image (see repo-root Dockerfile for the Go one)
-└── README.md                  # Space config (title, hosting metadata)
-```
-
-**Design principles:**
-- Python + Go implementations (same interface, different runtimes)
-- Shared core with CLI, MCP, REST, and web delivery surfaces
-- Database, not log files — structured queries across time
-- Hard-fail, never degrade — paper without `retrieval_id` is worse than error
-- Offline acceptance tests plus explicit live connector tests
-- Single-writer queue, not row-level locking — simplest thing that keeps the hash chain consistent under concurrency
-
-## Development
+The default CI-safe suite excludes live-network and benchmark tests:
 
 ```bash
-# Python
-pip install -e ".[dev]"
 pytest -m "not live and not benchmark" -v
-
-# Go
-cd go-biolab
-go test ./...
-go build -o biolab ./cmd/cli
-go build -o biolab-server ./cmd/server
+ruff check .
+mypy biolab
 ```
 
-## Deployment
+Live connector tests require network access and may be rate-limited. They are
+not evidence that a source API will remain available or return unchanged data.
 
-| Target | Method |
-|--------|--------|
-| **Hosted (no install)** | https://biolab-a2a.vercel.app/ — MCP, REST, dashboard, and A2A on one domain |
-| **Local** | `pipx install biolab-mcp` or download binary |
-| **CI/CD** | GitHub Actions → PyPI (Trusted Publishing/OIDC) + GHCR + GitHub Releases |
-| **Containers** | `docker pull ghcr.io/srikarjy/biolab-mcp:latest`, or build `space/Dockerfile` yourself |
-| **Linux packages** | `.deb`, `.rpm`, `.apk` via goreleaser |
-| **Discovery** | [MCP Registry](https://registry.modelcontextprotocol.io) · [Smithery](https://smithery.ai/servers/srikarjy025/biolab-mcp) |
+The project also contains:
 
-**Student-cost path:** local SQLite, the CLI, dashboard, MCP server, BioClaw
-client, and Caddy gateway require no paid service. Free hosted tiers may also work,
-but their quotas and persistence policies can change; verify them before relying on
-a public deployment.
+- [`ONBOARDING.md`](ONBOARDING.md) — architecture and contributor entry points
+- [`docs/END_TO_END_USER_GUIDE.md`](docs/END_TO_END_USER_GUIDE.md) — user workflow
+- [`docs/A2A.md`](docs/A2A.md) — A2A request and discovery details
+- [`docs/COMPLEX_PROBLEM_LOG.md`](docs/COMPLEX_PROBLEM_LOG.md) — investigation log
+- [`TODO.md`](TODO.md) — backlog and verification baseline
 
-## Roadmap
+## Release status
 
-- [x] Added/removed/content-changed evidence monitoring via response hashes
-- [x] Projects, collections, claims, reports, REST, dashboard, and agent packaging
-- [ ] Provenance graph (cross-source linking by DOI)
-- [ ] Nextflow/Snakemake plugins
-- [ ] Rate limiting + caching (audit-safe)
-- [ ] Organization accounts and fine-grained project authorization
-- [ ] Retraction/correction feeds with durable alert delivery
+The repository source currently declares version `0.4.1`. The hosted deployment
+and source tree are separate from package publication: do not assume that the
+latest repository commit is already available on PyPI. Check the package index
+and release workflow before installing a specific version.
+
+The Hugging Face Space is not the canonical deployment path for this project.
+Use the Vercel URL above for the current hosted demo, or run the application
+locally for private storage and full control.
 
 ## License
 
-MIT — see [LICENSE](LICENSE)
-
-## Author
-
-**Srikar Jy** — [srikarjy025@gmail.com](mailto:srikarjy025@gmail.com)
+MIT. See [`LICENSE`](LICENSE).

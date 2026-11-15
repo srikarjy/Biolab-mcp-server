@@ -267,6 +267,284 @@ credentials are absent. The UI flow is fixed, but durable cross-instance
 projects and evidence require `TURSO_DATABASE_URL` and `TURSO_AUTH_TOKEN` in
 the deployment environment.
 
+## 2026-11-14 — Add deterministic paper-ranking foundation
+
+### Problem
+
+The workspace preserved scientific retrievals but had no transparent way to
+triage several returned papers or explain why one appeared above another.
+
+### Investigation
+
+Existing source adapters already normalize titles, abstracts, publication types,
+journal dates, and source metadata into retrieval snapshots. The existing
+retrieval IDs and hash chain provide stable provenance links for derived ranking
+records.
+
+### Solution
+
+Added `ranking_runs` and `ranking_candidates` tables plus a deterministic v1
+scorer. It combines query fit, entity/subject fit, requested study-design fit,
+recency, and metadata completeness. Each candidate stores its component scores,
+matched terms, missing facets, and reason codes. Added REST endpoints and MCP
+tools so all delivery surfaces can use the same ranking service.
+
+### Verification
+
+- Full offline suite: `108 passed, 28 deselected`.
+- Ruff and MyPy pass.
+- Ranking tests cover exact/title matches, missing metadata, deterministic
+  ordering, top-five persistence, and unknown retrieval rejection.
+- REST test covers ranking creation and retrieval of stored explanations.
+
+### Boundary preserved
+
+The score means query-fit triage only. It does not establish paper quality,
+scientific truth, clinical validity, or replace scientist review.
+
+## 2026-11-15 — Connect ranking to the scientist review queue
+
+### Problem
+
+The ranking service returned explanations, but a scientist could not inspect
+the top candidates or record a review decision from the hosted dashboard.
+
+### Investigation
+
+The live dashboard was exercised after a preserved UniProt search. The ranking
+run and score components were returned correctly. A response-contract gap was
+found because the create response did not include the persisted candidate rank
+or candidate ID needed by the review action.
+
+### Solution
+
+The dashboard now automatically ranks the preserved search results, renders a
+top-five review queue with score components, reason codes, matched terms, and
+missing facets, and supports accepted, rejected, and conflicting decisions.
+The ranking response now includes `rank` and `ranking_candidate_id`. REST and
+MCP expose the same review operation.
+
+### Verification
+
+- Full offline suite: `111 passed, 28 deselected`.
+- Ruff and MyPy pass.
+- Live search returned a preserved retrieval.
+- Live ranking returned `rank: 1` and a reviewable candidate ID.
+- Live review recorded `review_state: rejected` with a reviewer note.
+
+### Boundary preserved
+
+The review queue records a scientist or agent decision; it does not convert a
+ranking into a scientific conclusion or clinical recommendation.
+
+## 2026-11-15 — Citation-safe grounded extraction and disposable parser data
+
+### Problem
+
+Parsing five papers is useful only if every extracted insight can be traced to
+the exact preserved source text and temporary parser state can be removed
+without breaking later review.
+
+### Solution
+
+Added `inference_runs`, `inference_claims`, `claim_citations`, and
+`parser_chunks`. The deterministic extractor reads only preserved title and
+abstract fields, stores sentence offsets and SHA-256 excerpt hashes, and
+returns zero insights when query terms do not match. `flush_parser_chunks`
+deletes only temporary chunks; claim rows and citation links remain inspectable
+and reconstruct excerpts from the durable retrieval snapshot.
+
+### Verification
+
+- Unit and REST tests cover extraction, citation offsets, unknown retrievals,
+  inspection, and flush preservation.
+- Hosted browser QA completed search -> preserve -> rank -> inference -> flush.
+- Production network log showed successful `/v1/inferences` (201) and flush
+  (200); no console errors or warnings.
+
+### Boundary preserved
+
+The parser is not an LLM and does not infer unsupported conclusions. A future
+model-backed summarizer must consume these citations and remain a separate,
+reviewable layer.
+
+## 2026-11-15 — Handle serverless retrieval visibility during grounded parsing
+
+### Problem
+
+The public Vercel demo has no configured Turso variables, so search, ranking,
+and inference can land on separate invocations with different ephemeral
+SQLite files. The dashboard then reported valid retrieval IDs as missing.
+
+### Solution
+
+The dashboard now sends the exact returned evidence snapshots with the
+inference request. The parser can use those records only as request-context
+evidence, stores citation excerpts and source metadata, and labels the result
+`request-context` rather than pretending it is durable. Durable deployments
+continue to resolve retrieval IDs from the audit database.
+
+### Verification
+
+- Added a regression test for inference from request-context evidence.
+- Full offline suite: `119 passed, 28 deselected`; Ruff and MyPy pass.
+
+### Boundary preserved
+
+Request-context parsing fixes the demo UX but does not replace durable storage.
+Configure Turso before relying on inference history, later inspection, or
+cross-instance retention.
+
+## 2026-11-15 — Add DeepSeek generation and pgvector RAG boundary
+
+### Problem
+
+The original grounded parser was deterministic sentence extraction. It did not
+implement the requested DeepSeek reasoning layer, cloud vector storage, or
+retrieval-augmented context selection.
+
+### Solution
+
+Added an OpenAI-compatible DeepSeek client, structured JSON generation contract,
+strict retrieval/field/span citation validation, and a pgvector adapter for
+cloud evidence chunks. When `DEEPSEEK_API_KEY` is configured, inference uses
+DeepSeek. When Postgres/pgvector and an embedding endpoint are configured,
+sentence chunks are embedded, stored, and similarity-filtered before the model
+call. Flush removes both local parser chunks and cloud vector chunks while
+retaining claims and citation metadata.
+
+### Verification
+
+- DeepSeek-path test rejects an unsupported fake citation and retains the valid
+  citation.
+- Full offline suite: `120 passed, 28 deselected`; Ruff and MyPy pass.
+- No API key or cloud database is stored in the repository; deployment uses
+  environment configuration only.
+
+### Boundary preserved
+
+This wiring proves the provider and storage contracts, not a live DeepSeek or
+pgvector run in this environment. A production acceptance run must configure
+the secrets and independently verify model responses, embedding dimensions,
+database persistence, and flush counts.
+
+## 2026-11-15 — Integrate Hugging Face document parsing
+
+### Problem
+
+DeepSeek should synthesize grounded evidence, but PDF layout/OCR parsing needs
+to happen before chunking so citations can retain page and bounding-box context.
+
+### Solution
+
+Added a Hugging Face parser adapter targeting a configured Inference Endpoint
+or Space wrapper, defaulting to `nvidia/Nemotron-3.5-Parse`. It normalizes
+returned pages/elements into hashed blocks, stores parser runs locally, and
+exposes REST/MCP inspect and flush operations. Parser output remains separate
+from DeepSeek claims and pgvector chunks.
+
+### Verification
+
+- Parser persistence/flush unit test and REST test pass with a mocked HF
+  response contract.
+- Full offline suite: `122 passed, 28 deselected`; Ruff and MyPy pass.
+
+### Boundary preserved
+
+The repository does not claim a live HF model call without `HF_TOKEN` and
+`HF_PARSER_ENDPOINT`. The endpoint wrapper must render PDF pages and return
+page-aware blocks; model output is still untrusted until citation validation.
+
+The follow-up integration adds `biolab_parser_chunks` to the optional pgvector
+store. Parser blocks are embedded independently from evidence claims so page
+and layout metadata are not conflated with citation records. Parser flush now
+removes both local blocks and their vector rows while preserving parser-run
+metadata needed for audit review.
+
+## 2026-11-15 — Server-side exports and cross-surface contracts
+
+### Problem
+
+Project reports had JSON/Markdown paths but no deterministic PDF artifact, and
+A2A could search only while REST and MCP could rank and parse.
+
+### Solution
+
+Added a bounded dependency-free PDF renderer with SHA-256 export records. The
+Agent Card now advertises the file-download limitation explicitly, while A2A
+`message/send` dispatches `rank`, `grounded_insights`, and `project_report`
+operations through the same service functions used by REST and MCP. Project
+records now carry owner and organization identifiers, and REST project listing
+and reporting enforce the request identity.
+
+### Verification
+
+- PDF response starts with `%PDF-1.4` and is recorded with a checksum.
+- A2A ranking contract test returns the same retrieval ID as the shared ranking
+  service.
+- Full offline suite: `116 passed, 28 deselected`; Ruff and MyPy pass.
+
+### Boundary preserved
+
+The PDF renderer is intentionally text-focused. Durable multi-user hosting
+still requires `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, authenticated API keys,
+and organization-specific operational controls.
+
+## 2026-11-15 — Save reviewed ranking results into project storage
+
+### Problem
+
+The dashboard could record a review decision, but the reviewed paper still
+needed a safe, explicit transition into project evidence storage.
+
+### Solution
+
+Added an atomic save operation shared by REST, MCP, A2A, and the dashboard. It
+creates or reuses a `Reviewed ranking evidence` collection, requires accepted
+candidate state, records the ranking note and retrieval ID, and rolls back the
+whole operation on failure. An override note is required to save a non-accepted
+candidate.
+
+### Verification
+
+- Unit/API test proves unreviewed candidates are rejected and accepted ones are
+  persisted.
+- Hosted workflow returned project `201`, search `200`, ranking `201`, review
+  `200`, and reviewed-evidence save `201` with one saved retrieval.
+
+### Boundary preserved
+
+Saving evidence records a review decision and project relationship; it does not
+assert that the paper is true or clinically valid.
+
+## 2026-11-15 — Enforce authenticated tenant boundaries
+
+### Problem
+
+Owner and organization fields alone do not prevent an authenticated caller from
+guessing another project or retrieval ID and reading it through a different
+route.
+
+### Solution
+
+Added request-identity helpers and service-boundary checks for authenticated
+retrieval fetches, ranking/inference inputs, project reports, collections,
+watches, claims, and reviewed-evidence saves. Cross-owner project listing and
+report access now return an empty list or not-found response. Anonymous access
+continues only for the deliberate public demo mode.
+
+### Verification
+
+- Cross-owner API test creates an Alice key and proves Bob cannot list or report
+  Alice's project.
+- Full offline suite: `118 passed, 28 deselected`; Ruff and MyPy pass.
+
+### Boundary preserved
+
+This is application-level tenant isolation, not a compliance certification. A
+public deployment still needs durable Turso/Postgres storage, key rotation,
+rate limits, backups, TLS, and an organization-specific security review.
+
 ## Entry template
 
 Use this shape for future complex problems:

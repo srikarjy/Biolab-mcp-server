@@ -1,5 +1,6 @@
 """MCP, REST, and dashboard server for the Biolab evidence workspace."""
 
+import base64
 import json
 import os
 
@@ -14,9 +15,13 @@ from biolab import (
     biorxiv_client,
     clinicaltrials_client,
     db,
+    document_parser,
     europepmc_client,
     executions,
+    exports,
+    inference,
     pubmed_client,
+    ranking,
     retrieval_log,
     tools,
     web,
@@ -99,6 +104,108 @@ def search_evidence(
     )
 
 
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def rank_evidence(
+    question: str,
+    retrieval_ids: list[str],
+    agent_id: str,
+    ctx: Context,
+    project_id: str | None = None,
+    requested_limit: int = 5,
+    as_of: str | None = None,
+) -> dict:
+    """Rank preserved retrievals with deterministic score components and reasons."""
+    return ranking.rank_retrievals(
+        _conn,
+        question,
+        retrieval_ids,
+        created_by=_bound(agent_id, ctx),
+        project_id=project_id,
+        requested_limit=requested_limit,
+        as_of=as_of,
+    )
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_ranking(ranking_run_id: str) -> dict:
+    """Fetch a ranking run and its stored explanations and review states."""
+    result = ranking.get_ranking(_conn, ranking_run_id)
+    if result is None:
+        raise ValueError("ranking run not found")
+    return result
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def review_ranked_candidate(
+    ranking_run_id: str,
+    ranking_candidate_id: str,
+    review_state: str,
+    reviewed_by: str,
+    review_note: str = "",
+) -> dict:
+    """Record accepted, rejected, or conflicting scientist review for a candidate."""
+    return ranking.review_candidate(
+        _conn, ranking_run_id, ranking_candidate_id,
+        review_state=review_state, reviewed_by=reviewed_by, review_note=review_note,
+    )
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def create_grounded_insights(
+    question: str,
+    retrieval_ids: list[str],
+    created_by: str,
+    ctx: Context,
+    project_id: str | None = None,
+    ranking_run_id: str | None = None,
+    max_insights: int = 10,
+) -> dict:
+    """Extract insights only from preserved evidence and return citation spans."""
+    return inference.create_inference(
+        _conn, question, retrieval_ids,
+        created_by=_bound(created_by, ctx), project_id=project_id,
+        ranking_run_id=ranking_run_id, max_insights=max_insights,
+    )
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_grounded_insights(inference_run_id: str) -> dict:
+    """Fetch grounded claims and their validated retrieval citations."""
+    result = inference.get_inference(_conn, inference_run_id)
+    if result is None:
+        raise ValueError("inference run not found")
+    return result
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def flush_grounded_parser_data(inference_run_id: str) -> dict:
+    """Delete temporary parser chunks while preserving claims and citations."""
+    return inference.flush_parser_chunks(_conn, inference_run_id)
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def parse_document_with_huggingface(filename: str, content_base64: str, ctx: Context) -> dict:
+    """Parse a PDF through the configured Hugging Face document parser."""
+    return document_parser.create_parser_run(
+        _conn, base64.b64decode(content_base64, validate=True), filename, _bound("mcp:parser", ctx)
+    )
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_parsed_document(parser_run_id: str) -> dict:
+    """Inspect page-aware Hugging Face parser blocks."""
+    result = document_parser.get_parser_run(_conn, parser_run_id)
+    if result is None:
+        raise ValueError("parser run not found")
+    return result
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def flush_parsed_document(parser_run_id: str) -> dict:
+    """Delete temporary parsed blocks while retaining audit claims."""
+    return document_parser.flush_parser_run(_conn, parser_run_id)
+
+
 @mcp.tool(name="search", annotations=SEARCH_ANNOTATIONS)
 def plugin_search(query: str, ctx: Context) -> dict:
     """Search all evidence sources for ChatGPT/Codex knowledge compatibility."""
@@ -139,45 +246,54 @@ def plugin_fetch(id: str) -> dict:  # noqa: A002 - MCP knowledge-tool schema cal
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
-def create_project(name: str, description: str = "") -> dict:
+def create_project(name: str, ctx: Context, description: str = "") -> dict:
     """Create a persistent scientist research project."""
-    return workspace.create_project(_conn, name, description)
+    return workspace.create_project(_conn, name, description, _bound("mcp:user", ctx))
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def list_projects() -> dict:
+def list_projects(ctx: Context) -> dict:
     """List scientist research projects."""
-    return {"projects": workspace.list_projects(_conn)}
+    return {"projects": workspace.list_projects(_conn, _bound("mcp:user", ctx))}
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
-def create_evidence_collection(project_id: str, name: str, description: str = "") -> dict:
+def create_evidence_collection(project_id: str, name: str, ctx: Context, description: str = "") -> dict:
     """Create a reviewed evidence collection in a project."""
-    return workspace.create_collection(_conn, project_id, name, description)
+    return workspace.create_collection(_conn, project_id, name, description, _bound("mcp:user", ctx))
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def list_evidence_collections(project_id: str | None = None) -> dict:
+def list_evidence_collections(ctx: Context, project_id: str | None = None) -> dict:
     """List evidence collections, optionally within one project."""
-    return {"collections": workspace.list_collections(_conn, project_id)}
+    owner = _bound("mcp:user", ctx)
+    if project_id and not workspace.has_project_access(_conn, project_id, owner):
+        raise ValueError("project not found")
+    return {"collections": workspace.list_collections(_conn, project_id, owner)}
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
 def add_evidence_to_collection(
     collection_id: str,
     retrieval_id: str,
+    ctx: Context,
     relevance: str = "unreviewed",
     note: str = "",
 ) -> dict:
     """Add or update a retrieval in a scientist-reviewed evidence collection."""
+    collection = workspace.get_collection(_conn, collection_id)
+    if collection is None or not workspace.has_project_access(_conn, collection["project_id"], _bound("mcp:user", ctx)):
+        raise ValueError("collection not found")
     return workspace.add_collection_item(_conn, collection_id, retrieval_id, note, relevance)
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def get_evidence_collection(collection_id: str) -> dict:
+def get_evidence_collection(collection_id: str, ctx: Context) -> dict:
     """Return a collection and its reviewed evidence items."""
     collection = workspace.get_collection(_conn, collection_id)
     if collection is None:
+        raise ValueError("collection not found")
+    if not workspace.has_project_access(_conn, collection["project_id"], _bound("mcp:user", ctx)):
         raise ValueError("collection not found")
     return collection
 
@@ -193,14 +309,17 @@ def create_evidence_watch(
 ) -> dict:
     """Create a saved query for explicit evidence-change monitoring."""
     return workspace.create_watch(
-        _conn, project_id, source, query, _bound(agent_id, ctx), max_results
+        _conn, project_id, source, query, _bound(agent_id, ctx), max_results, _bound(agent_id, ctx)
     )
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def list_evidence_watches(project_id: str | None = None) -> dict:
+def list_evidence_watches(ctx: Context, project_id: str | None = None) -> dict:
     """List saved evidence watches, optionally within one project."""
-    return {"watches": workspace.list_watches(_conn, project_id)}
+    owner = _bound("mcp:user", ctx)
+    if project_id and not workspace.has_project_access(_conn, project_id, owner):
+        raise ValueError("project not found")
+    return {"watches": workspace.list_watches(_conn, project_id, owner)}
 
 
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)
@@ -222,9 +341,9 @@ def run_all_evidence_watches() -> dict:
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
-def create_claim(project_id: str, claim: str) -> dict:
+def create_claim(project_id: str, claim: str, ctx: Context) -> dict:
     """Create a scientific claim record without asserting that it is true."""
-    return workspace.create_claim(_conn, project_id, claim)
+    return workspace.create_claim(_conn, project_id, claim, _bound("mcp:user", ctx))
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
@@ -251,12 +370,48 @@ def trace_claim(claim_id: str) -> dict:
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def get_project_report(project_id: str) -> dict:
+def get_project_report(project_id: str, ctx: Context) -> dict:
     """Return collections, claims, evidence links, watches, and events for a project."""
-    result = workspace.get_project_report(_conn, project_id)
+    result = workspace.get_project_report(_conn, project_id, _bound("mcp:user", ctx))
     if result is None:
         raise ValueError("project not found")
     return result
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def export_project_report(project_id: str, ctx: Context, format: str = "markdown") -> dict:
+    """Render a project report as JSON, Markdown, or base64-encoded PDF."""
+    report = workspace.get_project_report(_conn, project_id, _bound("mcp:user", ctx))
+    if report is None:
+        raise ValueError("project not found")
+    if format == "json":
+        content = json.dumps(report, indent=2, sort_keys=True).encode()
+        media_type = "application/json"
+    elif format == "markdown":
+        content = workspace.render_project_markdown(report).encode()
+        media_type = "text/markdown"
+    elif format == "pdf":
+        content = exports.markdown_to_pdf(workspace.render_project_markdown(report))
+        media_type = "application/pdf"
+    else:
+        raise ValueError("format must be json, markdown, or pdf")
+    record = exports.record_export(_conn, project_id, format, content, "mcp")
+    return {
+        "export": record,
+        "media_type": media_type,
+        "content_utf8": content.decode("utf-8", "replace") if format != "pdf" else None,
+        "content_base64": base64.b64encode(content).decode() if format == "pdf" else None,
+    }
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def save_reviewed_evidence(
+    project_id: str, ranking_run_id: str, candidate_ids: list[str], ctx: Context, override_note: str = ""
+) -> dict:
+    """Save accepted ranked candidates to the project's reviewed evidence collection."""
+    return workspace.save_reviewed_candidates(
+        _conn, project_id, ranking_run_id, candidate_ids, owner_id=_bound("mcp:user", ctx), override_note=override_note
+    )
 
 
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)
