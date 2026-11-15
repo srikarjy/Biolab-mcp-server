@@ -36,6 +36,31 @@ def test_huggingface_parser_api_persists_and_flushes(monkeypatch, tmp_path):
     assert created.status_code == 201
     assert detail.json()["blocks"][0]["text"] == "Parsed"
     assert flushed.json()["flushed_parsed_blocks"] == 1
+
+
+def test_parsed_documents_live_inside_project_folder_and_download(monkeypatch, tmp_path):
+    from biolab import hf_parser
+
+    monkeypatch.setattr(hf_parser, "parse_document", lambda content, filename: {
+        "parser_model": "nvidia/Nemotron-3.5-Parse", "status": "succeeded", "source_hash": "abc", "block_count": 1,
+        "blocks": [{"block_id": "b1", "page_number": 1, "block_index": 0, "block_type": "paragraph", "text": "Stored evidence", "bbox": None}],
+    })
+    with TestClient(create_app(tmp_path / "folder.db")) as client:
+        project = client.post("/v1/projects", json={"name": "Diabetes review"}).json()
+        parsed = client.post("/v1/parser/parse", json={
+            "project_id": project["project_id"], "filename": "paper.pdf",
+            "content_base64": base64.b64encode(b"pdf").decode(),
+        })
+        run_id = parsed.json()["parser_run_id"]
+        folder = client.get(f"/v1/projects/{project['project_id']}/parser-runs")
+        download = client.get(f"/v1/parser/runs/{run_id}/download")
+    assert parsed.status_code == 201
+    assert parsed.json()["project_id"] == project["project_id"]
+    assert folder.status_code == 200
+    assert folder.json()["parser_runs"][0]["parser_run_id"] == run_id
+    assert download.status_code == 200
+    assert download.headers["content-disposition"].endswith('"paper.parsed.json"')
+    assert download.json()["blocks"][0]["text"] == "Stored evidence"
 def test_search_api_uses_shared_service(monkeypatch, tmp_path):
     captured = {}
 

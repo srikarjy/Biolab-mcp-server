@@ -45,8 +45,10 @@ OPENAPI_SCHEMA = {
         "/v1/inferences/{inference_run_id}": {"get": {"summary": "Get grounded insights and citations"}},
         "/v1/inferences/{inference_run_id}/flush": {"post": {"summary": "Flush disposable parser chunks"}},
         "/v1/parser/parse": {"post": {"summary": "Parse a PDF through the configured Hugging Face parser"}},
+        "/v1/projects/{project_id}/parser-runs": {"get": {"summary": "List parsed documents in a project folder"}},
         "/v1/parser/runs/{parser_run_id}": {"get": {"summary": "Inspect parsed document blocks"}},
         "/v1/parser/runs/{parser_run_id}/flush": {"post": {"summary": "Flush parsed document blocks"}},
+        "/v1/parser/runs/{parser_run_id}/download": {"get": {"summary": "Download parsed document JSON"}},
         "/v1/retrievals/{retrieval_id}": {"get": {"summary": "Fetch a preserved retrieval"}},
         "/v1/verify": {"get": {"summary": "Verify the audit hash chain"}},
         "/v1/projects": {
@@ -678,7 +680,7 @@ async def parser_parse(request: Request) -> JSONResponse:
             return JSONResponse({"error": "content_base64 is required"}, status_code=400)
         result = document_parser.create_parser_run(
             request.app.state.conn, base64.b64decode(encoded, validate=True),
-            str(payload.get("filename", "document.pdf")), auth.request_identity(request),
+            str(payload.get("filename", "document.pdf")), auth.request_identity(request), str(payload.get("project_id")) if payload.get("project_id") else None,
         )
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -688,15 +690,34 @@ async def parser_parse(request: Request) -> JSONResponse:
 
 
 async def parser_detail(request: Request) -> JSONResponse:
-    result = document_parser.get_parser_run(request.app.state.conn, request.path_params["parser_run_id"])
-    if result is None:
+    try:
+        result = document_parser.assert_run_access(request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request))
+    except ValueError:
         return JSONResponse({"error": "parser run not found"}, status_code=404)
     return JSONResponse(result)
 
 
+async def project_parser_runs(request: Request) -> JSONResponse:
+    try:
+        result = document_parser.list_parser_runs(request.app.state.conn, request.path_params["project_id"], auth.request_identity(request))
+    except ValueError:
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    return JSONResponse({"parser_runs": result})
+
+
+async def parser_download(request: Request) -> Response:
+    try:
+        result = document_parser.assert_run_access(request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request))
+    except ValueError:
+        return JSONResponse({"error": "parser run not found"}, status_code=404)
+    payload = json.dumps(result, indent=2, sort_keys=True).encode("utf-8")
+    filename = result["filename"].rsplit(".", 1)[0] + ".parsed.json"
+    return Response(payload, media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
 async def parser_flush(request: Request) -> JSONResponse:
     try:
-        result = document_parser.flush_parser_run(request.app.state.conn, request.path_params["parser_run_id"])
+        result = document_parser.flush_parser_run(request.app.state.conn, document_parser.assert_run_access(request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request))["parser_run_id"])
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     return JSONResponse(result)
@@ -956,8 +977,10 @@ def api_routes() -> list[Route]:
         Route("/v1/inferences/{inference_run_id}", inference_detail),
         Route("/v1/inferences/{inference_run_id}/flush", inference_flush, methods=["POST"]),
         Route("/v1/parser/parse", parser_parse, methods=["POST"]),
+        Route("/v1/projects/{project_id}/parser-runs", project_parser_runs),
         Route("/v1/parser/runs/{parser_run_id}", parser_detail),
         Route("/v1/parser/runs/{parser_run_id}/flush", parser_flush, methods=["POST"]),
+        Route("/v1/parser/runs/{parser_run_id}/download", parser_download),
         Route("/v1/retrievals/{retrieval_id}", get_retrieval),
         Route("/v1/verify", verify),
         Route("/v1/projects", projects, methods=["GET", "POST"]),

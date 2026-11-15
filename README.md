@@ -335,6 +335,13 @@ quoted span cannot be matched to the supplied evidence. Without these
 variables, the dashboard uses the transparent local extractor and labels
 request-context runs as non-durable.
 
+Parsed documents can be assigned to a project folder by including `project_id`
+in `POST /v1/parser/parse`. Use `GET /v1/projects/{project_id}/parser-runs` to
+list that project’s parsed documents and `GET /v1/parser/runs/{parser_run_id}/download`
+to download the page-aware parsed JSON. Project ownership is checked at each
+read, download, and flush boundary; the raw PDF is not retained by this parser
+endpoint.
+
 For durable hosted storage, install the optional Turso dependency and configure
 both variables:
 

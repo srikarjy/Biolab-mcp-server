@@ -260,9 +260,10 @@ CREATE TABLE IF NOT EXISTS exports (
 CREATE INDEX IF NOT EXISTS idx_exports_project ON exports(project_id, created_at);
 
 CREATE TABLE IF NOT EXISTS parser_runs (
-    parser_run_id TEXT PRIMARY KEY, filename TEXT NOT NULL, parser_model TEXT NOT NULL,
+    parser_run_id TEXT PRIMARY KEY, project_id TEXT, filename TEXT NOT NULL, parser_model TEXT NOT NULL,
     source_hash TEXT NOT NULL, status TEXT NOT NULL, block_count INTEGER NOT NULL,
-    created_by TEXT NOT NULL, created_at TEXT NOT NULL
+    created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
 );
 CREATE TABLE IF NOT EXISTS parsed_blocks (
     block_id TEXT PRIMARY KEY, parser_run_id TEXT NOT NULL, page_number INTEGER NOT NULL,
@@ -334,6 +335,13 @@ def _upgrade_citations(conn: Any) -> None:
             conn.execute(f"ALTER TABLE claim_citations ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
 
 
+def _upgrade_parser_runs(conn: Any) -> None:
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(parser_runs)").fetchall()}
+    if "project_id" not in columns:
+        conn.execute("ALTER TABLE parser_runs ADD COLUMN project_id TEXT")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_parser_runs_project ON parser_runs(project_id, created_at)")
+
+
 def connect(db_path: str) -> Any:
     global _current_target
     target, token = resolve_target(db_path)
@@ -343,6 +351,7 @@ def connect(db_path: str) -> Any:
     _upgrade_retrievals(conn)
     _upgrade_projects(conn)
     _upgrade_citations(conn)
+    _upgrade_parser_runs(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_owner ON projects(owner_id)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_projects_org ON projects(organization_id)")
     conn.commit()

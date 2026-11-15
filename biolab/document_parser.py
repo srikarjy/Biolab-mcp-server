@@ -8,18 +8,20 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from biolab import hf_parser, rag
+from biolab import hf_parser, rag, workspace
 
 
-def create_parser_run(conn: Any, content: bytes, filename: str, created_by: str) -> dict[str, Any]:
+def create_parser_run(conn: Any, content: bytes, filename: str, created_by: str, project_id: str | None = None) -> dict[str, Any]:
+    if project_id and not workspace.has_project_access(conn, project_id, created_by):
+        raise ValueError("project access denied")
     parsed = hf_parser.parse_document(content, filename)
     run_id = str(uuid.uuid4())
     created_at = datetime.now(UTC).isoformat()
     conn.execute(
         """INSERT INTO parser_runs
-           (parser_run_id, filename, parser_model, source_hash, status, block_count, created_by, created_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-        (run_id, filename, parsed["parser_model"], parsed["source_hash"], parsed["status"], parsed["block_count"], created_by, created_at),
+           (parser_run_id, project_id, filename, parser_model, source_hash, status, block_count, created_by, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        (run_id, project_id, filename, parsed["parser_model"], parsed["source_hash"], parsed["status"], parsed["block_count"], created_by, created_at),
     )
     for block in parsed["blocks"]:
         conn.execute(
@@ -30,15 +32,32 @@ def create_parser_run(conn: Any, content: bytes, filename: str, created_by: str)
         )
     conn.commit()
     vector_status = rag.index_parser_blocks(run_id, parsed["blocks"])
-    return {"parser_run_id": run_id, "filename": filename, "parser_model": parsed["parser_model"], "source_hash": parsed["source_hash"], "status": parsed["status"], "block_count": parsed["block_count"], "created_by": created_by, "created_at": created_at, "blocks": parsed["blocks"], "vector_status": vector_status}
+    return {"parser_run_id": run_id, "project_id": project_id, "filename": filename, "parser_model": parsed["parser_model"], "source_hash": parsed["source_hash"], "status": parsed["status"], "block_count": parsed["block_count"], "created_by": created_by, "created_at": created_at, "blocks": parsed["blocks"], "vector_status": vector_status}
 
 
 def get_parser_run(conn: Any, parser_run_id: str) -> dict[str, Any] | None:
-    row = conn.execute("SELECT parser_run_id, filename, parser_model, source_hash, status, block_count, created_by, created_at FROM parser_runs WHERE parser_run_id = ?", (parser_run_id,)).fetchone()
+    row = conn.execute("SELECT parser_run_id, project_id, filename, parser_model, source_hash, status, block_count, created_by, created_at FROM parser_runs WHERE parser_run_id = ?", (parser_run_id,)).fetchone()
     if row is None:
         return None
     blocks = conn.execute("SELECT block_id, page_number, block_index, block_type, text, bbox, content_hash FROM parsed_blocks WHERE parser_run_id = ? ORDER BY page_number, block_index", (parser_run_id,)).fetchall()
-    return {"parser_run_id": row[0], "filename": row[1], "parser_model": row[2], "source_hash": row[3], "status": row[4], "block_count": row[5], "created_by": row[6], "created_at": row[7], "blocks": [{"block_id": item[0], "page_number": item[1], "block_index": item[2], "block_type": item[3], "text": item[4], "bbox": json.loads(item[5]) if item[5] != "null" else None, "content_hash": item[6]} for item in blocks]}
+    return {"parser_run_id": row[0], "project_id": row[1], "filename": row[2], "parser_model": row[3], "source_hash": row[4], "status": row[5], "block_count": row[6], "created_by": row[7], "created_at": row[8], "blocks": [{"block_id": item[0], "page_number": item[1], "block_index": item[2], "block_type": item[3], "text": item[4], "bbox": json.loads(item[5]) if item[5] != "null" else None, "content_hash": item[6]} for item in blocks]}
+
+
+def list_parser_runs(conn: Any, project_id: str, owner_id: str) -> list[dict[str, Any]]:
+    if not workspace.has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
+    rows = conn.execute(
+        "SELECT parser_run_id, project_id, filename, parser_model, source_hash, status, block_count, created_by, created_at FROM parser_runs WHERE project_id = ? ORDER BY created_at DESC",
+        (project_id,),
+    ).fetchall()
+    return [{"parser_run_id": row[0], "project_id": row[1], "filename": row[2], "parser_model": row[3], "source_hash": row[4], "status": row[5], "block_count": row[6], "created_by": row[7], "created_at": row[8]} for row in rows]
+
+
+def assert_run_access(conn: Any, parser_run_id: str, owner_id: str) -> dict[str, Any]:
+    result = get_parser_run(conn, parser_run_id)
+    if result is None or result["created_by"] != owner_id and not (result["project_id"] and workspace.has_project_access(conn, result["project_id"], owner_id)):
+        raise ValueError("parser run not found")
+    return result
 
 
 def flush_parser_run(conn: Any, parser_run_id: str) -> dict[str, Any]:
