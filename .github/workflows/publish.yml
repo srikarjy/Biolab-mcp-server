@@ -14,6 +14,11 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install build
+      - name: Verify tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python -c 'import os, tomllib; from pathlib import Path; version=tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]; tag=os.environ["RELEASE_TAG"].removeprefix("v"); assert tag == version, f"Git tag v{tag} does not match package version {version}"'
       - run: python -m build
       - uses: actions/upload-artifact@v4
         with:

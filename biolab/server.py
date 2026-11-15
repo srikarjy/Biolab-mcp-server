@@ -8,6 +8,7 @@ from mcp.types import ToolAnnotations
 from starlette.responses import JSONResponse
 
 from biolab import (
+    a2a,
     artifacts,
     auth,
     biorxiv_client,
@@ -565,7 +566,9 @@ class ApiKeyAuthMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if scope.get("path", "") in {"/", "/health", "/openapi.json"}:
+        if scope.get("path", "") in {
+            "/", "/health", "/openapi.json", "/.well-known/agent-card.json"
+        }:
             await self.app(scope, receive, send)
             return
 
@@ -597,6 +600,7 @@ def create_hosted_app():
     """Create one ASGI app serving MCP, REST, health, and the dashboard."""
     app = mcp.streamable_http_app()
     app.state.conn = _conn
+    app.state.a2a_tasks = a2a.A2ATaskStore()
     app.routes.extend(web.api_routes())
     app.add_middleware(ApiKeyAuthMiddleware)
     return app

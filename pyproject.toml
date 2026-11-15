@@ -4,10 +4,10 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "biolab-mcp"
-version = "0.4.0"
+version = "0.4.1"
 description = "Local-first scientific evidence workspace with auditable retrieval, monitoring, and provenance"
 readme = "README.md"
-license = "MIT"
+license = {file = "LICENSE"}
 authors = [
     {name = "Srikar Jy", email = "srikarjy025@gmail.com"}
 ]

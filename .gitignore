@@ -13,3 +13,4 @@ build/
 go-biolab/bin/
 export_*.jsonl
 biolab_artifacts/
+.vercel
