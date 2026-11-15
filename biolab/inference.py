@@ -15,6 +15,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
+from biolab import deepseek_client, rag
+
 PARSER_VERSION = "grounded-extraction-v1"
 SENTENCE_RE = re.compile(r"[^.!?]+(?:[.!?]+|$)")
 
@@ -33,6 +35,73 @@ def _sentences(value: str) -> list[tuple[int, int, str]]:
 
 def _citation_id(*parts: str) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def _deepseek_inference(
+    conn: Any, question: str, rows: list[tuple[Any, ...]], *, created_by: str,
+    project_id: str | None, ranking_run_id: str | None, max_insights: int,
+    missing: list[str],
+) -> dict[str, Any]:
+    run_id = str(uuid.uuid4())
+    evidence = [
+        {"retrieval_id": row[0], "source": row[1], "external_id": row[2], "snapshot": json.loads(row[3])}
+        for row in rows
+    ]
+    context, rag_status = rag.retrieve_context(question, run_id, evidence, max_insights)
+    generated = deepseek_client.generate_grounded_claims(question, context, max_insights)
+    created_at = _now()
+    conn.execute(
+        """INSERT INTO inference_runs
+           (inference_run_id, project_id, ranking_run_id, question, parser_version,
+            model_provider, model_name, status, created_by, created_at, completed_at)
+           VALUES (?, ?, ?, ?, 'deepseek-grounded-v1', ?, ?, 'succeeded', ?, ?, ?)""",
+        (run_id, project_id, ranking_run_id, question.strip(), generated["model_provider"], generated["model_name"], created_by.strip(), created_at, _now()),
+    )
+    insights: list[dict[str, Any]] = []
+    by_id = {item["retrieval_id"]: item for item in evidence}
+    for generated_claim in generated["insights"]:
+        if not isinstance(generated_claim, dict) or not isinstance(generated_claim.get("text"), str):
+            continue
+        valid: list[dict[str, Any]] = []
+        for citation in generated_claim.get("citations", []):
+            if not isinstance(citation, dict) or citation.get("retrieval_id") not in by_id:
+                continue
+            item = by_id[citation["retrieval_id"]]
+            field_name = citation.get("field_name", "abstract")
+            source_text = str(item["snapshot"].get(field_name, "")) if field_name in {"title", "abstract"} else ""
+            excerpt = str(citation.get("excerpt") or citation.get("quote") or "")
+            start = source_text.find(excerpt) if excerpt else -1
+            if start < 0:
+                try:
+                    start = int(citation.get("span_start", -1))
+                    end = int(citation.get("span_end", -1))
+                except (TypeError, ValueError):
+                    continue
+                excerpt = source_text[start:end] if 0 <= start < end <= len(source_text) else ""
+            else:
+                end = start + len(excerpt)
+            if not excerpt:
+                continue
+            valid.append({"item": item, "field_name": field_name, "start": start, "end": end, "excerpt": excerpt})
+        if not valid:
+            continue
+        claim_id = str(uuid.uuid4())
+        conn.execute("INSERT INTO inference_claims (claim_id, inference_run_id, claim_text, created_at) VALUES (?, ?, ?, ?)", (claim_id, run_id, generated_claim["text"].strip(), created_at))
+        citations: list[dict[str, Any]] = []
+        for citation in valid:
+            item = citation["item"]
+            citation_id = _citation_id(run_id, item["retrieval_id"], citation["field_name"], str(citation["start"]), str(citation["end"]))
+            excerpt_hash = hashlib.sha256(citation["excerpt"].encode("utf-8")).hexdigest()
+            conn.execute(
+                """INSERT INTO claim_citations
+                   (citation_id, claim_id, retrieval_id, field_name, span_start, span_end, excerpt_hash, locator, source, external_id, excerpt_text)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (citation_id, claim_id, item["retrieval_id"], citation["field_name"], citation["start"], citation["end"], excerpt_hash, f"{item['source']}:{item['external_id']}", item["source"], item["external_id"], citation["excerpt"]),
+            )
+            citations.append({"citation_id": citation_id, "retrieval_id": item["retrieval_id"], "source": item["source"], "external_id": item["external_id"], "field_name": citation["field_name"], "span_start": citation["start"], "span_end": citation["end"], "excerpt_hash": excerpt_hash, "excerpt": citation["excerpt"], "locator": f"{item['source']}:{item['external_id']}"})
+        insights.append({"claim_id": claim_id, "text": generated_claim["text"].strip(), "citations": citations})
+    conn.commit()
+    return {"inference_run_id": run_id, "question": question.strip(), "parser_version": "deepseek-grounded-v1", "model_provider": generated["model_provider"], "model_name": generated["model_name"], "status": "succeeded", "durability": "database" if not missing else "request-context", "rag": rag_status, "insight_count": len(insights), "insights": insights, "parser_chunk_count": 0}
 
 
 def create_inference(  # noqa: PLR0912 - validation, fallback, parsing, and persistence are one atomic operation
@@ -77,6 +146,12 @@ def create_inference(  # noqa: PLR0912 - validation, fallback, parsing, and pers
         raise ValueError("project not found")
     if ranking_run_id and conn.execute("SELECT 1 FROM ranking_runs WHERE ranking_run_id = ?", (ranking_run_id,)).fetchone() is None:
         ranking_run_id = None
+
+    if deepseek_client.configured():
+        return _deepseek_inference(
+            conn, question, rows, created_by=created_by, project_id=project_id,
+            ranking_run_id=ranking_run_id, max_insights=max_insights, missing=missing,
+        )
 
     run_id = str(uuid.uuid4())
     created_at = _now()
@@ -199,4 +274,5 @@ def flush_parser_chunks(conn: Any, inference_run_id: str) -> dict[str, Any]:
     count = conn.execute("SELECT count(*) FROM parser_chunks WHERE inference_run_id = ?", (inference_run_id,)).fetchone()[0]
     conn.execute("DELETE FROM parser_chunks WHERE inference_run_id = ?", (inference_run_id,))
     conn.commit()
-    return {"inference_run_id": inference_run_id, "flushed_parser_chunks": count, "claims_preserved": True}
+    vector_count = rag.flush_context(inference_run_id)
+    return {"inference_run_id": inference_run_id, "flushed_parser_chunks": count, "flushed_vector_chunks": vector_count, "claims_preserved": True}

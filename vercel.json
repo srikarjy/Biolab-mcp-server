@@ -1,6 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
-  "installCommand": "pip install \".[turso]\"",
+  "installCommand": "pip install \".[turso,pgvector]\"",
   "functions": {
     "api/index.py": {
       "maxDuration": 60

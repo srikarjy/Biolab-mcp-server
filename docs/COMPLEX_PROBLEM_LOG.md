@@ -395,6 +395,39 @@ Request-context parsing fixes the demo UX but does not replace durable storage.
 Configure Turso before relying on inference history, later inspection, or
 cross-instance retention.
 
+## 2026-11-15 — Add DeepSeek generation and pgvector RAG boundary
+
+### Problem
+
+The original grounded parser was deterministic sentence extraction. It did not
+implement the requested DeepSeek reasoning layer, cloud vector storage, or
+retrieval-augmented context selection.
+
+### Solution
+
+Added an OpenAI-compatible DeepSeek client, structured JSON generation contract,
+strict retrieval/field/span citation validation, and a pgvector adapter for
+cloud evidence chunks. When `DEEPSEEK_API_KEY` is configured, inference uses
+DeepSeek. When Postgres/pgvector and an embedding endpoint are configured,
+sentence chunks are embedded, stored, and similarity-filtered before the model
+call. Flush removes both local parser chunks and cloud vector chunks while
+retaining claims and citation metadata.
+
+### Verification
+
+- DeepSeek-path test rejects an unsupported fake citation and retains the valid
+  citation.
+- Full offline suite: `120 passed, 28 deselected`; Ruff and MyPy pass.
+- No API key or cloud database is stored in the repository; deployment uses
+  environment configuration only.
+
+### Boundary preserved
+
+This wiring proves the provider and storage contracts, not a live DeepSeek or
+pgvector run in this environment. A production acceptance run must configure
+the secrets and independently verify model responses, embedding dimensions,
+database persistence, and flush counts.
+
 ## 2026-11-15 — Server-side exports and cross-surface contracts
 
 ### Problem

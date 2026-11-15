@@ -291,6 +291,28 @@ Local deployments use SQLite:
 BIOLAB_DB_PATH=biolab.db
 ```
 
+DeepSeek and cloud RAG are opt-in production capabilities:
+
+```text
+DEEPSEEK_API_KEY=...
+DEEPSEEK_BASE_URL=https://api.deepseek.com
+DEEPSEEK_MODEL=deepseek-chat
+DATABASE_URL=postgresql://...          # Postgres with pgvector enabled
+BIOLAB_EMBEDDING_API_URL=https://.../v1/embeddings
+BIOLAB_EMBEDDING_API_KEY=...
+BIOLAB_EMBEDDING_MODEL=text-embedding-3-small
+BIOLAB_EMBEDDING_DIMENSION=1536
+```
+
+When `DEEPSEEK_API_KEY` is present, inference uses DeepSeek’s structured
+grounded-generation path. When the database and embedding provider are also
+configured, source chunks are indexed in `biolab_evidence_chunks` and the
+question is narrowed through pgvector similarity before DeepSeek sees the
+context. Citation validation rejects claims whose retrieval ID, field, or
+quoted span cannot be matched to the supplied evidence. Without these
+variables, the dashboard uses the transparent local extractor and labels
+request-context runs as non-durable.
+
 For durable hosted storage, install the optional Turso dependency and configure
 both variables:
 

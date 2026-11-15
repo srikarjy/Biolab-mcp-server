@@ -47,6 +47,10 @@ it does not validate scientific conclusions or provide clinical advice.
 - Authenticated REST reads and writes now enforce retrieval ownership and
   project/collection/watch/claim access at the service boundary; anonymous mode
   remains an explicitly limited demo policy.
+- DeepSeek-compatible grounded generation and optional cloud pgvector RAG are
+  wired behind environment configuration, with citation validation rejecting
+  unsupported retrieval IDs or source spans. The local extractor remains an
+  explicit offline fallback.
 - Offline demo, integrity verification, package metadata, and test coverage.
 
 ## Architecture boundaries
