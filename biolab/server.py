@@ -308,8 +308,9 @@ def create_evidence_watch(
     max_results: int = 10,
 ) -> dict:
     """Create a saved query for explicit evidence-change monitoring."""
+    owner = _bound("mcp:user", ctx)
     return workspace.create_watch(
-        _conn, project_id, source, query, _bound(agent_id, ctx), max_results, _bound(agent_id, ctx)
+        _conn, project_id, source, query, _bound(agent_id, ctx), max_results, owner
     )
 
 
