@@ -11,6 +11,7 @@ from typing import Any
 from biolab import hf_parser, rag, workspace
 
 SECTION_NAMES = ("title", "abstract", "introduction", "methods", "results", "discussion", "conclusion", "table", "figure_caption", "references", "unknown")
+REVIEW_STATES = {"pending", "accepted", "excluded"}
 
 
 def classify_section(block: dict[str, Any]) -> str:
@@ -69,7 +70,7 @@ def create_parser_run(conn: Any, content: bytes, filename: str, created_by: str,
             (block["block_id"], run_id, block["page_number"], block["block_index"], block["block_type"], block["section_name"], block["text"], json.dumps(block["bbox"]), hashlib.sha256(block["text"].encode()).hexdigest(), created_at),
         )
     conn.commit()
-    vector_status = rag.index_parser_blocks(project_id or "unassigned", document_id, run_id, parsed["blocks"])
+    vector_status = {"status": "pending_review", "indexed_blocks": 0}
     return {"parser_run_id": run_id, "project_id": project_id, "document_id": document_id, "filename": filename, "parser_model": parsed["parser_model"], "source_hash": parsed["source_hash"], "status": parsed["status"], "block_count": parsed["block_count"], "created_by": created_by, "created_at": created_at, "blocks": parsed["blocks"], "vector_status": vector_status}
 
 
@@ -77,8 +78,25 @@ def get_parser_run(conn: Any, parser_run_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT parser_run_id, project_id, document_id, filename, parser_model, source_hash, status, block_count, created_by, created_at FROM parser_runs WHERE parser_run_id = ?", (parser_run_id,)).fetchone()
     if row is None:
         return None
-    blocks = conn.execute("SELECT block_id, page_number, block_index, block_type, section_name, text, bbox, content_hash FROM parsed_blocks WHERE parser_run_id = ? ORDER BY page_number, block_index", (parser_run_id,)).fetchall()
-    return {"parser_run_id": row[0], "project_id": row[1], "document_id": row[2], "filename": row[3], "parser_model": row[4], "source_hash": row[5], "status": row[6], "block_count": row[7], "created_by": row[8], "created_at": row[9], "blocks": [{"block_id": item[0], "page_number": item[1], "block_index": item[2], "block_type": item[3], "section_name": item[4], "text": item[5], "bbox": json.loads(item[6]) if item[6] != "null" else None, "content_hash": item[7]} for item in blocks]}
+    blocks = conn.execute("SELECT block_id, page_number, block_index, block_type, section_name, text, bbox, content_hash, review_state, review_note FROM parsed_blocks WHERE parser_run_id = ? ORDER BY page_number, block_index", (parser_run_id,)).fetchall()
+    return {"parser_run_id": row[0], "project_id": row[1], "document_id": row[2], "filename": row[3], "parser_model": row[4], "source_hash": row[5], "status": row[6], "block_count": row[7], "created_by": row[8], "created_at": row[9], "blocks": [{"block_id": item[0], "page_number": item[1], "block_index": item[2], "block_type": item[3], "section_name": item[4], "text": item[5], "bbox": json.loads(item[6]) if item[6] != "null" else None, "content_hash": item[7], "review_state": item[8], "review_note": item[9]} for item in blocks]}
+
+
+def review_block(conn: Any, parser_run_id: str, block_id: str, review_state: str, reviewed_by: str, note: str = "") -> dict[str, Any]:
+    if review_state not in REVIEW_STATES - {"pending"}:
+        raise ValueError("review_state must be accepted or excluded")
+    run = assert_run_access(conn, parser_run_id, reviewed_by)
+    row = conn.execute("SELECT block_id, page_number, block_type, section_name, text FROM parsed_blocks WHERE parser_run_id = ? AND block_id = ?", (parser_run_id, block_id)).fetchone()
+    if row is None:
+        raise ValueError("parsed block not found")
+    conn.execute("UPDATE parsed_blocks SET review_state = ?, review_note = ? WHERE block_id = ?", (review_state, note.strip(), block_id))
+    conn.commit()
+    vector_status = {"status": "not_indexed", "indexed_blocks": 0}
+    if review_state == "accepted":
+        vector_status = rag.index_parser_blocks(run["project_id"] or "unassigned", run["document_id"] or run["parser_run_id"], parser_run_id, [{"block_id": row[0], "page_number": row[1], "block_type": row[2], "section_name": row[3], "text": row[4]}])
+    else:
+        rag.flush_parser_block(block_id)
+    return {"parser_run_id": parser_run_id, "block_id": block_id, "review_state": review_state, "review_note": note.strip(), "vector_status": vector_status}
 
 
 def list_parser_runs(conn: Any, project_id: str, owner_id: str) -> list[dict[str, Any]]:

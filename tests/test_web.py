@@ -31,10 +31,15 @@ def test_huggingface_parser_api_persists_and_flushes(monkeypatch, tmp_path):
     with TestClient(create_app(tmp_path / "parser-web.db")) as client:
         created = client.post("/v1/parser/parse", json={"filename": "paper.pdf", "content_base64": base64.b64encode(b"pdf").decode()})
         run_id = created.json()["parser_run_id"]
+        block_id = created.json()["blocks"][0]["block_id"]
         detail = client.get(f"/v1/parser/runs/{run_id}")
+        reviewed = client.post(f"/v1/parser/runs/{run_id}/blocks/{block_id}/review", json={"review_state": "accepted", "note": "Relevant to the review"})
         flushed = client.post(f"/v1/parser/runs/{run_id}/flush")
     assert created.status_code == 201
     assert detail.json()["blocks"][0]["text"] == "Parsed"
+    assert detail.json()["blocks"][0]["review_state"] == "pending"
+    assert reviewed.status_code == 200
+    assert reviewed.json()["review_state"] == "accepted"
     assert flushed.json()["flushed_parsed_blocks"] == 1
 
 

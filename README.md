@@ -350,6 +350,12 @@ retrieval to specific scientific sections. The endpoint reports `disabled` until
 provider and pgvector database are configured; it never silently falls back to
 cross-project or unindexed data.
 
+Parsed blocks start as `pending`. A scientist must call
+`POST /v1/parser/runs/{parser_run_id}/blocks/{block_id}/review` with
+`{"review_state":"accepted"}` before that block is embedded into pgvector.
+`excluded` blocks remain in the audit record but are removed from the vector
+index.
+
 For durable hosted storage, install the optional Turso dependency and configure
 both variables:
 

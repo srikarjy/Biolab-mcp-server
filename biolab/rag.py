@@ -101,7 +101,7 @@ class PgVectorStore:
                        (chunk_id, project_id, document_id, parser_run_id, block_id, page_number, section_name, block_type, chunk_text, embedding)
                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)
                        ON CONFLICT (chunk_id) DO UPDATE SET chunk_text=excluded.chunk_text, embedding=excluded.embedding""",
-                    (str(uuid.uuid4()), project_id, document_id, parser_run_id, block["block_id"], block["page_number"], block.get("section_name", "unknown"), block["block_type"], block["text"], str(vector)),
+                    (block["block_id"], project_id, document_id, parser_run_id, block["block_id"], block["page_number"], block.get("section_name", "unknown"), block["block_type"], block["text"], str(vector)),
                 )
         self.conn.commit()
         return len(texts)
@@ -110,6 +110,14 @@ class PgVectorStore:
         self.ensure_schema()
         with self.conn.cursor() as cur:
             cur.execute("DELETE FROM biolab_parser_chunks WHERE parser_run_id = %s", (parser_run_id,))
+            count = cur.rowcount
+        self.conn.commit()
+        return count
+
+    def flush_parser_block(self, block_id: str) -> int:
+        self.ensure_schema()
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM biolab_parser_chunks WHERE block_id = %s", (block_id,))
             count = cur.rowcount
         self.conn.commit()
         return count
@@ -188,6 +196,12 @@ def flush_parser_context(parser_run_id: str) -> int:
     if not (os.environ.get("DATABASE_URL") or os.environ.get("PGVECTOR_DATABASE_URL")):
         return 0
     return PgVectorStore().flush_parser_run(parser_run_id)
+
+
+def flush_parser_block(block_id: str) -> int:
+    if not (os.environ.get("DATABASE_URL") or os.environ.get("PGVECTOR_DATABASE_URL")):
+        return 0
+    return PgVectorStore().flush_parser_block(block_id)
 
 
 def search_parser_context(project_id: str, question: str, top_k: int = 8, sections: list[str] | None = None) -> dict[str, Any]:

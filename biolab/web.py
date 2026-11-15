@@ -49,6 +49,7 @@ OPENAPI_SCHEMA = {
         "/v1/projects/{project_id}/parser-runs": {"get": {"summary": "List parsed documents in a project folder"}},
         "/v1/projects/{project_id}/rag/search": {"post": {"summary": "Search project-scoped parsed RAG chunks"}},
         "/v1/parser/runs/{parser_run_id}": {"get": {"summary": "Inspect parsed document blocks"}},
+        "/v1/parser/runs/{parser_run_id}/blocks/{block_id}/review": {"post": {"summary": "Accept or exclude a parsed block for RAG"}},
         "/v1/parser/runs/{parser_run_id}/flush": {"post": {"summary": "Flush parsed document blocks"}},
         "/v1/parser/runs/{parser_run_id}/download": {"get": {"summary": "Download parsed document JSON"}},
         "/v1/retrievals/{retrieval_id}": {"get": {"summary": "Fetch a preserved retrieval"}},
@@ -734,6 +735,18 @@ async def parser_download(request: Request) -> Response:
     return Response(payload, media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
+async def parser_block_review(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        result = document_parser.review_block(
+            request.app.state.conn, request.path_params["parser_run_id"], request.path_params["block_id"],
+            str(payload.get("review_state", "")), auth.request_identity(request), str(payload.get("note", "")),
+        )
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400 if "review_state" in str(exc) else 404)
+    return JSONResponse(result)
+
+
 async def parser_flush(request: Request) -> JSONResponse:
     try:
         result = document_parser.flush_parser_run(request.app.state.conn, document_parser.assert_run_access(request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request))["parser_run_id"])
@@ -999,6 +1012,7 @@ def api_routes() -> list[Route]:
         Route("/v1/projects/{project_id}/parser-runs", project_parser_runs),
         Route("/v1/projects/{project_id}/rag/search", project_rag_search, methods=["POST"]),
         Route("/v1/parser/runs/{parser_run_id}", parser_detail),
+        Route("/v1/parser/runs/{parser_run_id}/blocks/{block_id}/review", parser_block_review, methods=["POST"]),
         Route("/v1/parser/runs/{parser_run_id}/flush", parser_flush, methods=["POST"]),
         Route("/v1/parser/runs/{parser_run_id}/download", parser_download),
         Route("/v1/retrievals/{retrieval_id}", get_retrieval),
