@@ -414,7 +414,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const project = report.project || {};
         detail.innerHTML = `<strong>${escapeHtml(project.name || 'Project')}</strong><br>
           ${escapeHtml(project.description || 'No description')}<br>
-          ${report.collections.length} collections · ${report.claims.length} claims · ${report.watches.length} watches<br>
+          ${report.collections.length} collections · ${report.claims.length} claims · ${(report.parser_runs || []).length} parsed documents · ${report.watches.length} watches<br>
           <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report" target="_blank" rel="noreferrer">Open JSON report ↗</a> ·
           <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report?format=markdown" target="_blank" rel="noreferrer">Open Markdown report ↗</a>`;
       } catch (error) { detail.textContent = String(error); }

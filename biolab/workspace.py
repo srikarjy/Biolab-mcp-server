@@ -514,6 +514,12 @@ def get_project_report(conn: Any, project_id: str, owner_id: str | None = None) 
            FROM evidence_watches WHERE project_id = ? ORDER BY created_at""",
         (project_id,),
     ).fetchall()
+    parser_runs = conn.execute(
+        """SELECT parser_run_id, filename, parser_model, source_hash, status,
+                  block_count, created_by, created_at
+           FROM parser_runs WHERE project_id = ? ORDER BY created_at DESC""",
+        (project_id,),
+    ).fetchall()
     return {
         "project": {
             "project_id": project_row[0], "name": project_row[1],
@@ -522,6 +528,14 @@ def get_project_report(conn: Any, project_id: str, owner_id: str | None = None) 
         },
         "collections": [get_collection(conn, row[0]) for row in collection_ids],
         "claims": [trace_claim(conn, row[0]) for row in claim_ids],
+        "parser_runs": [
+            {
+                "parser_run_id": row[0], "filename": row[1], "parser_model": row[2],
+                "source_hash": row[3], "status": row[4], "block_count": row[5],
+                "created_by": row[6], "created_at": row[7],
+            }
+            for row in parser_runs
+        ],
         "watches": [
             {
                 "watch_id": row[0], "source": row[1], "query": row[2],
@@ -586,6 +600,16 @@ def render_project_markdown(report: dict) -> str:
                 f"  - Recorded events: {len(watch['events'])}",
             ]
         )
+    lines.extend(["## Parsed documents", ""])
+    for parsed in report.get("parser_runs", []):
+        lines.extend([
+            f"- **{parsed['filename']}** — `{parsed['parser_run_id']}`",
+            f"  - Status: {parsed['status']}; blocks: {parsed['block_count']}",
+            f"  - Source hash: `{parsed['source_hash']}`",
+        ])
+    if not report.get("parser_runs"):
+        lines.append("No parsed documents.")
+    lines.append("")
     lines.extend(
         [
             "",
