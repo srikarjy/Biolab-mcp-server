@@ -455,6 +455,12 @@ The repository does not claim a live HF model call without `HF_TOKEN` and
 `HF_PARSER_ENDPOINT`. The endpoint wrapper must render PDF pages and return
 page-aware blocks; model output is still untrusted until citation validation.
 
+The follow-up integration adds `biolab_parser_chunks` to the optional pgvector
+store. Parser blocks are embedded independently from evidence claims so page
+and layout metadata are not conflated with citation records. Parser flush now
+removes both local blocks and their vector rows while preserving parser-run
+metadata needed for audit review.
+
 ## 2026-11-15 — Server-side exports and cross-surface contracts
 
 ### Problem

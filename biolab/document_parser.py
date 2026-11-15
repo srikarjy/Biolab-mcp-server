@@ -8,7 +8,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from biolab import hf_parser
+from biolab import hf_parser, rag
 
 
 def create_parser_run(conn: Any, content: bytes, filename: str, created_by: str) -> dict[str, Any]:
@@ -29,7 +29,8 @@ def create_parser_run(conn: Any, content: bytes, filename: str, created_by: str)
             (block["block_id"], run_id, block["page_number"], block["block_index"], block["block_type"], block["text"], json.dumps(block["bbox"]), hashlib.sha256(block["text"].encode()).hexdigest(), created_at),
         )
     conn.commit()
-    return {"parser_run_id": run_id, "filename": filename, "parser_model": parsed["parser_model"], "source_hash": parsed["source_hash"], "status": parsed["status"], "block_count": parsed["block_count"], "created_by": created_by, "created_at": created_at, "blocks": parsed["blocks"]}
+    vector_status = rag.index_parser_blocks(run_id, parsed["blocks"])
+    return {"parser_run_id": run_id, "filename": filename, "parser_model": parsed["parser_model"], "source_hash": parsed["source_hash"], "status": parsed["status"], "block_count": parsed["block_count"], "created_by": created_by, "created_at": created_at, "blocks": parsed["blocks"], "vector_status": vector_status}
 
 
 def get_parser_run(conn: Any, parser_run_id: str) -> dict[str, Any] | None:
@@ -46,4 +47,5 @@ def flush_parser_run(conn: Any, parser_run_id: str) -> dict[str, Any]:
     count = conn.execute("SELECT count(*) FROM parsed_blocks WHERE parser_run_id = ?", (parser_run_id,)).fetchone()[0]
     conn.execute("DELETE FROM parsed_blocks WHERE parser_run_id = ?", (parser_run_id,))
     conn.commit()
-    return {"parser_run_id": parser_run_id, "flushed_parsed_blocks": count, "claims_preserved": True}
+    vector_count = rag.flush_parser_context(parser_run_id)
+    return {"parser_run_id": parser_run_id, "flushed_parsed_blocks": count, "flushed_vector_blocks": vector_count, "claims_preserved": True}
