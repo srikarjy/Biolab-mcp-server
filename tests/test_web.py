@@ -300,3 +300,17 @@ def test_project_report_api_supports_json_and_markdown(tmp_path):
     assert markdown_report.text.startswith("# Report")
     assert pdf_report.status_code == 200
     assert pdf_report.content.startswith(b"%PDF-1.4")
+
+
+def test_authenticated_projects_are_isolated_by_owner(tmp_path):
+    app = create_app(tmp_path / "tenant.db", require_auth=True)
+    with TestClient(app) as client:
+        alice_key = auth.create_api_key(app.state.conn, "alice", "user:alice")
+        bob_key = auth.create_api_key(app.state.conn, "bob", "user:bob")
+        alice = client.post("/v1/projects", headers={"Authorization": f"Bearer {alice_key}"}, json={"name": "Alice private"})
+        alice_id = alice.json()["project_id"]
+        bob_list = client.get("/v1/projects", headers={"Authorization": f"Bearer {bob_key}"})
+        bob_report = client.get(f"/v1/projects/{alice_id}/report", headers={"Authorization": f"Bearer {bob_key}"})
+    assert alice.status_code == 201
+    assert bob_list.json()["projects"] == []
+    assert bob_report.status_code == 404

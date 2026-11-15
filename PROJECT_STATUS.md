@@ -44,6 +44,9 @@ it does not validate scientific conclusions or provide clinical advice.
 - Atomic reviewed-evidence save path from ranking candidates into a project
   collection; unreviewed candidates are rejected unless an explicit override
   note is supplied.
+- Authenticated REST reads and writes now enforce retrieval ownership and
+  project/collection/watch/claim access at the service boundary; anonymous mode
+  remains an explicitly limited demo policy.
 - Offline demo, integrity verification, package metadata, and test coverage.
 
 ## Architecture boundaries

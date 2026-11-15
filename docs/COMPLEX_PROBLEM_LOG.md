@@ -424,6 +424,34 @@ candidate.
 Saving evidence records a review decision and project relationship; it does not
 assert that the paper is true or clinically valid.
 
+## 2026-11-15 — Enforce authenticated tenant boundaries
+
+### Problem
+
+Owner and organization fields alone do not prevent an authenticated caller from
+guessing another project or retrieval ID and reading it through a different
+route.
+
+### Solution
+
+Added request-identity helpers and service-boundary checks for authenticated
+retrieval fetches, ranking/inference inputs, project reports, collections,
+watches, claims, and reviewed-evidence saves. Cross-owner project listing and
+report access now return an empty list or not-found response. Anonymous access
+continues only for the deliberate public demo mode.
+
+### Verification
+
+- Cross-owner API test creates an Alice key and proves Bob cannot list or report
+  Alice's project.
+- Full offline suite: `118 passed, 28 deselected`; Ruff and MyPy pass.
+
+### Boundary preserved
+
+This is application-level tenant isolation, not a compliance certification. A
+public deployment still needs durable Turso/Postgres storage, key rotation,
+rate limits, backups, TLS, and an organization-specific security review.
+
 ## Entry template
 
 Use this shape for future complex problems:

@@ -90,6 +90,19 @@ def bind_agent_id(requested: str, request: Any = None) -> str:
     return requested
 
 
+def request_identity(request: Any = None, default: str = "anonymous") -> str:
+    """Return the middleware-bound identity for a request."""
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict) and scope.get("biolab_identity") is not None:
+        return str(scope["biolab_identity"])
+    identity = current_identity.get()
+    return str(identity) if identity is not None else default
+
+
+def is_authenticated(request: Any = None) -> bool:
+    return request_identity(request) not in {"", "anonymous"}
+
+
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 
