@@ -28,13 +28,31 @@ def classify_section(block: dict[str, Any]) -> str:
     return "unknown"
 
 
+def assign_sections(blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Propagate explicit section headings to following page blocks."""
+    current = "unknown"
+    assigned: list[dict[str, Any]] = []
+    for block in blocks:
+        direct = classify_section(block)
+        text = str(block.get("text", "")).strip().lower().rstrip(".:")
+        block_type = str(block.get("block_type", "")).lower()
+        is_heading = block_type in {"heading", "header", "section"} or text in SECTION_NAMES
+        if direct != "unknown":
+            current = direct
+        elif is_heading:
+            current = text if text in SECTION_NAMES else current
+        enriched = dict(block)
+        enriched["section_name"] = direct if direct != "unknown" else current
+        assigned.append(enriched)
+    return assigned
+
+
 def create_parser_run(conn: Any, content: bytes, filename: str, created_by: str, project_id: str | None = None) -> dict[str, Any]:
     if project_id and not workspace.has_project_access(conn, project_id, created_by):
         raise ValueError("project access denied")
     parsed = hf_parser.parse_document(content, filename)
     document_id = str(uuid.uuid4())
-    for block in parsed["blocks"]:
-        block["section_name"] = classify_section(block)
+    parsed["blocks"] = assign_sections(parsed["blocks"])
     run_id = str(uuid.uuid4())
     created_at = datetime.now(UTC).isoformat()
     conn.execute(

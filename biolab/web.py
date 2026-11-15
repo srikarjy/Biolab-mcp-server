@@ -713,7 +713,10 @@ async def project_rag_search(request: Request) -> JSONResponse:
         return JSONResponse({"error": "project not found"}, status_code=404)
     try:
         payload = await request.json()
-        result = rag.search_parser_context(project_id, str(payload.get("question", "")), int(payload.get("top_k", 8)))
+        sections = payload.get("sections")
+        if sections is not None and (not isinstance(sections, list) or not all(isinstance(section, str) for section in sections)):
+            return JSONResponse({"error": "sections must be a list of strings"}, status_code=400)
+        result = rag.search_parser_context(project_id, str(payload.get("question", "")), int(payload.get("top_k", 8)), sections)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except RuntimeError as exc:

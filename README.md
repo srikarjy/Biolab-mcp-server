@@ -345,7 +345,8 @@ endpoint.
 Project-scoped semantic retrieval is available at
 `POST /v1/projects/{project_id}/rag/search`. It searches only vectors belonging
 to that project and returns document, parser-run, block, page, section, and
-similarity metadata. The endpoint reports `disabled` until both an embedding
+similarity metadata. Pass `sections: ["results", "methods"]` to constrain
+retrieval to specific scientific sections. The endpoint reports `disabled` until both an embedding
 provider and pgvector database are configured; it never silently falls back to
 cross-project or unindexed data.
 

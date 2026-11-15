@@ -5,6 +5,13 @@ def test_section_classifier_keeps_scientific_sections_and_noise_explicit():
     assert document_parser.classify_section({"block_type": "heading", "text": "Results"}) == "results"
     assert document_parser.classify_section({"block_type": "table", "text": "Table 1"}) == "table"
     assert document_parser.classify_section({"block_type": "paragraph", "text": "A measured result."}) == "unknown"
+    blocks = document_parser.assign_sections([
+        {"block_type": "heading", "text": "Methods"},
+        {"block_type": "paragraph", "text": "Participants were enrolled."},
+        {"block_type": "heading", "text": "Results"},
+        {"block_type": "paragraph", "text": "The endpoint improved."},
+    ])
+    assert [block["section_name"] for block in blocks] == ["methods", "methods", "results", "results"]
 
 
 def test_parser_run_persists_page_aware_blocks_and_flushes(monkeypatch, tmp_path):

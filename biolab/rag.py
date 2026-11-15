@@ -114,17 +114,23 @@ class PgVectorStore:
         self.conn.commit()
         return count
 
-    def search_parser(self, project_id: str, embedding: list[float], top_k: int = 8) -> list[dict[str, Any]]:
+    def search_parser(self, project_id: str, embedding: list[float], top_k: int = 8, sections: list[str] | None = None) -> list[dict[str, Any]]:
         self.ensure_schema()
         with self.conn.cursor() as cur:
+            section_filter = ""
+            params: list[Any] = [str(embedding), project_id]
+            if sections:
+                section_filter = " AND section_name = ANY(%s)"
+                params.append(sections)
+            params.extend([str(embedding), top_k])
             cur.execute(
-                """SELECT chunk_id, project_id, document_id, parser_run_id, block_id,
+                f"""SELECT chunk_id, project_id, document_id, parser_run_id, block_id,
                           page_number, section_name, block_type, chunk_text,
                           1 - (embedding <=> %s::vector) AS similarity
                    FROM biolab_parser_chunks
-                   WHERE project_id = %s
+                   WHERE project_id = %s{section_filter}
                    ORDER BY embedding <=> %s::vector LIMIT %s""",
-                (str(embedding), project_id, str(embedding), top_k),
+                params,
             )
             columns = [column.name for column in (cur.description or [])]
             return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
@@ -184,10 +190,10 @@ def flush_parser_context(parser_run_id: str) -> int:
     return PgVectorStore().flush_parser_run(parser_run_id)
 
 
-def search_parser_context(project_id: str, question: str, top_k: int = 8) -> dict[str, Any]:
+def search_parser_context(project_id: str, question: str, top_k: int = 8, sections: list[str] | None = None) -> dict[str, Any]:
     if not question.strip():
         raise ValueError("question must not be empty")
     if not embedding_client.configured():
         return {"status": "disabled", "reason": "embedding provider not configured", "chunks": []}
     vector = embedding_client.embed([question])[0]
-    return {"status": "active", "chunks": PgVectorStore().search_parser(project_id, vector, top_k)}
+    return {"status": "active", "sections": sections or [], "chunks": PgVectorStore().search_parser(project_id, vector, top_k, sections)}
