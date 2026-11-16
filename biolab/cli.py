@@ -354,7 +354,7 @@ def web(
     host: str = typer.Option("127.0.0.1", "--host", help="Interface to bind"),
     port: int = typer.Option(8000, "--port", help="Port to bind"),
     db_path: str = typer.Option("biolab.db", "--db", help="Path to SQLite database"),
-    require_auth: bool = typer.Option(False, "--require-auth", help="Require a Biolab API key"),
+    require_auth: bool = typer.Option(True, "--require-auth/--allow-anonymous", help="Require a Biolab API key"),
 ):
     """Run the local evidence dashboard and REST API."""
     import uvicorn

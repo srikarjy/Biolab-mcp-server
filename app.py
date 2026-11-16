@@ -5,7 +5,8 @@ import os
 os.environ.setdefault("BIOLAB_DB_PATH", "/tmp/biolab.db")
 os.environ.setdefault("BIOLAB_ARTIFACT_DIR", "/tmp/biolab_artifacts")
 os.environ.setdefault("BIOLAB_A2A_BASE_PATH", "")
-os.environ.setdefault("BIOLAB_ALLOW_ANONYMOUS", "true")
+os.environ.setdefault("BIOLAB_REQUIRE_AUTH", "true")
+os.environ.setdefault("BIOLAB_ALLOW_ANONYMOUS", "false")
 # FastMCP enables localhost-only DNS rebinding protection when its host is
 # 127.0.0.1. Vercel terminates TLS and forwards the public Host header, so the
 # serverless adapter must opt out of that localhost-only default. The REST and

@@ -21,12 +21,23 @@ from biolab import (
     document_parser,
     evidence,
     exports,
+    hf_parser,
     inference,
     rag,
     ranking,
     retrieval_log,
     workspace,
 )
+
+MAX_ENCODED_DOCUMENT_CHARS = ((hf_parser.MAX_DOCUMENT_BYTES + 2) // 3) * 4
+
+
+def _decode_document_payload(encoded: object) -> bytes:
+    if not isinstance(encoded, str) or not encoded:
+        raise ValueError("content_base64 is required")
+    if len(encoded) > MAX_ENCODED_DOCUMENT_CHARS:
+        raise ValueError("encoded document exceeds maximum size")
+    return base64.b64decode(encoded, validate=True)
 
 OPENAPI_SCHEMA = {
     "openapi": "3.1.0",
@@ -775,6 +786,9 @@ async def rankings(request: Request) -> JSONResponse:
         retrieval_ids = payload.get("retrieval_ids", [])
         if not isinstance(retrieval_ids, list) or not all(isinstance(item, str) for item in retrieval_ids):
             return JSONResponse({"error": "retrieval_ids must be a list of strings"}, status_code=400)
+        project_id = str(payload["project_id"]) if payload.get("project_id") else None
+        if project_id and not workspace.has_project_access(request.app.state.conn, project_id, auth.request_identity(request)):
+            return JSONResponse({"error": "project not found"}, status_code=404)
         if auth.is_authenticated(request):
             identity = auth.request_identity(request)
             inaccessible = [item for item in retrieval_ids if (record := retrieval_log.get_retrieval(request.app.state.conn, item)) is None or record.agent_id != identity]
@@ -786,7 +800,7 @@ async def rankings(request: Request) -> JSONResponse:
             str(payload.get("question", "")),
             retrieval_ids,
             created_by=created_by,
-            project_id=str(payload["project_id"]) if payload.get("project_id") else None,
+            project_id=project_id,
             requested_limit=int(payload.get("requested_limit", 5)),
             as_of=str(payload["as_of"]) if payload.get("as_of") else None,
         )
@@ -801,12 +815,17 @@ async def ranking_detail(request: Request) -> JSONResponse:
     )
     if result is None:
         return JSONResponse({"error": "ranking run not found"}, status_code=404)
+    if result.get("project_id") and not workspace.has_project_access(request.app.state.conn, result["project_id"], auth.request_identity(request)):
+        return JSONResponse({"error": "ranking run not found"}, status_code=404)
     return JSONResponse(result)
 
 
 async def ranking_review(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
+        ranking_run = ranking.get_ranking(request.app.state.conn, request.path_params["ranking_run_id"])
+        if ranking_run is None or (ranking_run.get("project_id") and not workspace.has_project_access(request.app.state.conn, ranking_run["project_id"], auth.request_identity(request))):
+            return JSONResponse({"error": "ranking run not found"}, status_code=404)
         result = ranking.review_candidate(
             request.app.state.conn,
             request.path_params["ranking_run_id"],
@@ -826,6 +845,9 @@ async def inferences(request: Request) -> JSONResponse:
         retrieval_ids = payload.get("retrieval_ids", [])
         if not isinstance(retrieval_ids, list) or not all(isinstance(item, str) for item in retrieval_ids):
             return JSONResponse({"error": "retrieval_ids must be a list of strings"}, status_code=400)
+        project_id = str(payload["project_id"]) if payload.get("project_id") else None
+        if project_id and not workspace.has_project_access(request.app.state.conn, project_id, auth.request_identity(request)):
+            return JSONResponse({"error": "project not found"}, status_code=404)
         if auth.is_authenticated(request):
             identity = auth.request_identity(request)
             if any((record := retrieval_log.get_retrieval(request.app.state.conn, item)) is None or record.agent_id != identity for item in retrieval_ids):
@@ -835,7 +857,7 @@ async def inferences(request: Request) -> JSONResponse:
             str(payload.get("question", "")),
             retrieval_ids,
             created_by=auth.bind_agent_id(str(payload.get("created_by", "api:inference")), request),
-            project_id=str(payload["project_id"]) if payload.get("project_id") else None,
+            project_id=project_id,
             ranking_run_id=str(payload["ranking_run_id"]) if payload.get("ranking_run_id") else None,
             max_insights=int(payload.get("max_insights", 10)),
             evidence_records=payload.get("evidence_records") if isinstance(payload.get("evidence_records"), list) else None,
@@ -849,11 +871,16 @@ async def inference_detail(request: Request) -> JSONResponse:
     result = inference.get_inference(request.app.state.conn, request.path_params["inference_run_id"])
     if result is None:
         return JSONResponse({"error": "inference run not found"}, status_code=404)
+    if result.get("project_id") and not workspace.has_project_access(request.app.state.conn, result["project_id"], auth.request_identity(request)):
+        return JSONResponse({"error": "inference run not found"}, status_code=404)
     return JSONResponse(result)
 
 
 async def inference_flush(request: Request) -> JSONResponse:
     try:
+        existing = inference.get_inference(request.app.state.conn, request.path_params["inference_run_id"])
+        if existing is None or (existing.get("project_id") and not workspace.has_project_access(request.app.state.conn, existing["project_id"], auth.request_identity(request))):
+            return JSONResponse({"error": "inference run not found"}, status_code=404)
         result = inference.flush_parser_chunks(
             request.app.state.conn, request.path_params["inference_run_id"]
         )
@@ -865,11 +892,8 @@ async def inference_flush(request: Request) -> JSONResponse:
 async def parser_parse(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
-        encoded = payload.get("content_base64", "")
-        if not isinstance(encoded, str) or not encoded:
-            return JSONResponse({"error": "content_base64 is required"}, status_code=400)
         result = document_parser.create_parser_run(
-            request.app.state.conn, base64.b64decode(encoded, validate=True),
+            request.app.state.conn, _decode_document_payload(payload.get("content_base64", "")),
             str(payload.get("filename", "document.pdf")), auth.request_identity(request), str(payload.get("project_id")) if payload.get("project_id") else None,
         )
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -1051,11 +1075,11 @@ async def save_reviewed_project_evidence(request: Request) -> JSONResponse:
 async def collections(request: Request) -> JSONResponse:
     if request.method == "GET":
         project_id = request.query_params.get("project_id")
-        if project_id and auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, project_id, auth.request_identity(request)):
+        if project_id and not workspace.has_project_access(request.app.state.conn, project_id, auth.request_identity(request)):
             return JSONResponse({"error": "project not found"}, status_code=404)
         return JSONResponse({
             "collections": workspace.list_collections(
-                request.app.state.conn, project_id
+                request.app.state.conn, project_id, auth.request_identity(request)
             )
         })
     try:
@@ -1074,11 +1098,9 @@ async def collections(request: Request) -> JSONResponse:
 
 async def collection_detail(request: Request) -> JSONResponse:
     collection = workspace.get_collection(
-        request.app.state.conn, request.path_params["collection_id"]
+        request.app.state.conn, request.path_params["collection_id"], auth.request_identity(request)
     )
     if collection is None:
-        return JSONResponse({"error": "collection not found"}, status_code=404)
-    if auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, collection["project_id"], auth.request_identity(request)):
         return JSONResponse({"error": "collection not found"}, status_code=404)
     return JSONResponse(collection)
 
@@ -1086,8 +1108,8 @@ async def collection_detail(request: Request) -> JSONResponse:
 async def collection_items(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
-        collection = workspace.get_collection(request.app.state.conn, request.path_params["collection_id"])
-        if collection is None or (auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, collection["project_id"], auth.request_identity(request))):
+        collection = workspace.get_collection(request.app.state.conn, request.path_params["collection_id"], auth.request_identity(request))
+        if collection is None:
             return JSONResponse({"error": "collection not found"}, status_code=404)
         item = workspace.add_collection_item(
             request.app.state.conn,
@@ -1095,6 +1117,7 @@ async def collection_items(request: Request) -> JSONResponse:
             str(payload.get("retrieval_id", "")),
             str(payload.get("note", "")),
             str(payload.get("relevance", "unreviewed")),
+            auth.request_identity(request),
         )
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1104,17 +1127,17 @@ async def collection_items(request: Request) -> JSONResponse:
 async def watches(request: Request) -> JSONResponse:
     if request.method == "GET":
         project_id = request.query_params.get("project_id")
-        if project_id and auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, project_id, auth.request_identity(request)):
+        if project_id and not workspace.has_project_access(request.app.state.conn, project_id, auth.request_identity(request)):
             return JSONResponse({"error": "project not found"}, status_code=404)
         return JSONResponse({
             "watches": workspace.list_watches(
-                request.app.state.conn, project_id
+                request.app.state.conn, project_id, auth.request_identity(request)
             )
         })
     try:
         payload = await request.json()
         agent_id = auth.bind_agent_id(str(payload.get("agent_id", "api:watch")), request)
-        if auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, str(payload.get("project_id", "")), auth.request_identity(request)):
+        if not workspace.has_project_access(request.app.state.conn, str(payload.get("project_id", "")), auth.request_identity(request)):
             return JSONResponse({"error": "project not found"}, status_code=404)
         watch = workspace.create_watch(
             request.app.state.conn,
@@ -1130,32 +1153,33 @@ async def watches(request: Request) -> JSONResponse:
 
 
 async def run_all_watches(request: Request) -> JSONResponse:
-    result = workspace.run_active_watches(request.app.state.conn)
+    owner_id = auth.request_identity(request) if auth.is_authenticated(request) else None
+    result = workspace.run_active_watches(request.app.state.conn, owner_id) if owner_id is not None else workspace.run_active_watches(request.app.state.conn)
     return JSONResponse(result, status_code=200 if not result["errors"] else 207)
 
 
 async def run_watch(request: Request) -> JSONResponse:
     try:
-        result = workspace.run_watch(request.app.state.conn, request.path_params["watch_id"])
+        result = workspace.run_watch(request.app.state.conn, request.path_params["watch_id"], auth.request_identity(request))
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     return JSONResponse(result)
 
 
 async def watch_events(request: Request) -> JSONResponse:
-    events = workspace.list_watch_events(request.app.state.conn, request.path_params["watch_id"])
+    events = workspace.list_watch_events(request.app.state.conn, request.path_params["watch_id"], auth.request_identity(request))
     return JSONResponse({"events": events})
 
 
 async def claims(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
-        if auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, str(payload.get("project_id", "")), auth.request_identity(request)):
+        if not workspace.has_project_access(request.app.state.conn, str(payload.get("project_id", "")), auth.request_identity(request)):
             return JSONResponse({"error": "project not found"}, status_code=404)
         claim = workspace.create_claim(
             request.app.state.conn,
             str(payload.get("project_id", "")),
-            str(payload.get("claim", "")),
+            str(payload.get("claim", "")), auth.request_identity(request),
         )
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1166,7 +1190,7 @@ async def claim_evidence(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
         claim = workspace.trace_claim(request.app.state.conn, request.path_params["claim_id"])
-        if claim is None or (auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, claim["project_id"], auth.request_identity(request))):
+        if claim is None or not workspace.has_project_access(request.app.state.conn, claim["project_id"], auth.request_identity(request)):
             return JSONResponse({"error": "claim not found"}, status_code=404)
         link = workspace.link_claim_evidence(
             request.app.state.conn,
@@ -1174,7 +1198,7 @@ async def claim_evidence(request: Request) -> JSONResponse:
             str(payload.get("retrieval_id", "")),
             str(payload.get("stance", "")),
             str(payload.get("assessment", "unreviewed")),
-            str(payload.get("note", "")),
+            str(payload.get("note", "")), auth.request_identity(request),
         )
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1185,7 +1209,7 @@ async def claim_trace(request: Request) -> JSONResponse:
     result = workspace.trace_claim(request.app.state.conn, request.path_params["claim_id"])
     if result is None:
         return JSONResponse({"error": "claim not found"}, status_code=404)
-    if auth.is_authenticated(request) and not workspace.has_project_access(request.app.state.conn, result["project_id"], auth.request_identity(request)):
+    if not workspace.has_project_access(request.app.state.conn, result["project_id"], auth.request_identity(request)):
         return JSONResponse({"error": "claim not found"}, status_code=404)
     return JSONResponse(result)
 
@@ -1274,7 +1298,7 @@ def api_routes() -> list[Route]:
     ]
 
 
-def create_app(db_path: str | Path = "biolab.db", require_auth: bool = False) -> Starlette:
+def create_app(db_path: str | Path = "biolab.db", require_auth: bool = True) -> Starlette:
     """Create an isolated dashboard/API application for one audit database."""
 
     @asynccontextmanager
