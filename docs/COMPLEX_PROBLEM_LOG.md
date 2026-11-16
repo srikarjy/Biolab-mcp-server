@@ -410,7 +410,7 @@ strict retrieval/field/span citation validation, and a pgvector adapter for
 cloud evidence chunks. When `DEEPSEEK_API_KEY` is configured, inference uses
 DeepSeek. When Postgres/pgvector and an embedding endpoint are configured,
 sentence chunks are embedded, stored, and similarity-filtered before the model
-call. Flush removes both local parser chunks and cloud vector chunks while
+call. Flush removes cloud vector chunks while
 retaining claims and citation metadata.
 
 ### Verification
@@ -458,7 +458,7 @@ page-aware blocks; model output is still untrusted until citation validation.
 The follow-up integration adds `biolab_parser_chunks` to the optional pgvector
 store. Parser blocks are embedded independently from evidence claims so page
 and layout metadata are not conflated with citation records. Parser flush now
-removes both local blocks and their vector rows while preserving parser-run
+removes vector rows while preserving local blocks and parser-run
 metadata needed for audit review.
 
 ## 2026-11-15 — Server-side exports and cross-surface contracts

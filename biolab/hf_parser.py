@@ -12,6 +12,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import subprocess
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -37,7 +39,7 @@ def _normalize(raw: Any) -> list[dict[str, Any]]:
         page = {"text": page_value} if isinstance(page_value, str) else page_value
         if not isinstance(page, dict):
             continue
-        page_number = int(page.get("page", page.get("page_number", page_index)))
+        page_number = int(page.get("page") or page.get("page_number") or page_index)
         page_blocks = page.get("blocks") or page.get("elements")
         if not isinstance(page_blocks, list):
             page_blocks = [{"text": page.get("markdown") or page.get("text", ""), "type": "text"}]
@@ -61,7 +63,29 @@ def parse_document(content: bytes, filename: str) -> dict[str, Any]:
         raise ValueError(f"document exceeds {MAX_DOCUMENT_BYTES} byte limit")
     endpoint = os.environ.get("HF_PARSER_ENDPOINT")
     if not endpoint or not os.environ.get("HF_TOKEN"):
-        raise RuntimeError("HF_PARSER_ENDPOINT and HF_TOKEN are required for Hugging Face parsing")
+        text: str
+        if filename.lower().endswith(".pdf") or content.startswith(b"%PDF"):
+            if shutil.which("pdftotext") is None:
+                raise RuntimeError("local PDF parsing requires pdftotext or configured HF_PARSER_ENDPOINT and HF_TOKEN")
+            try:
+                completed = subprocess.run(
+                    ["pdftotext", "-layout", "-", "-"],
+                    input=content, capture_output=True, check=True,
+                    timeout=float(os.environ.get("LOCAL_PARSER_TIMEOUT_SECONDS", "30")),
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                raise RuntimeError(f"local PDF parsing failed: {exc}") from exc
+            text = completed.stdout.decode("utf-8", "replace")
+        else:
+            text = content.decode("utf-8", "replace")
+        blocks = fallback_text_blocks(text)
+        return {
+            "parser_model": "pdftotext-local",
+            "status": "succeeded-local",
+            "source_hash": hashlib.sha256(content).hexdigest(),
+            "block_count": len(blocks),
+            "blocks": blocks,
+        }
     prompt = os.environ.get("HF_PARSER_PROMPT", "</s><s><predict_bbox><predict_classes><output_markdown><predict_text_in_pic>")
     req = request.Request(
         endpoint, data=content,

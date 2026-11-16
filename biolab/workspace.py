@@ -241,6 +241,57 @@ def get_collection(conn: Any, collection_id: str) -> dict | None:
     }
 
 
+def save_retrieval_to_project(conn: Any, project_id: str, retrieval_id: str, owner_id: str) -> dict:
+    if not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
+    if conn.execute("SELECT 1 FROM retrievals WHERE retrieval_id = ?", (retrieval_id,)).fetchone() is None:
+        raise ValueError("retrieval not found")
+    row = conn.execute(
+        "SELECT collection_id FROM evidence_collections WHERE project_id = ? AND name = ?",
+        (project_id, "Selected papers"),
+    ).fetchone()
+    collection = get_collection(conn, row[0]) if row else create_collection(conn, project_id, "Selected papers", "MCP-retrieved papers selected for parsing", owner_id)
+    if collection is None:
+        raise ValueError("selected papers collection not found")
+    return add_collection_item(conn, collection["collection_id"], retrieval_id, "Selected for project parsing", "unreviewed")
+
+
+def list_project_retrievals(conn: Any, project_id: str, owner_id: str) -> list[dict]:
+    if not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
+    rows = conn.execute(
+        """SELECT DISTINCT r.retrieval_id, r.source, r.external_id, r.retrieved_at, r.snapshot,
+                  ci.relevance, pr.parser_run_id
+           FROM collection_items ci JOIN evidence_collections ec ON ec.collection_id = ci.collection_id
+           JOIN retrievals r ON r.retrieval_id = ci.retrieval_id
+           LEFT JOIN parser_runs pr ON pr.retrieval_id = r.retrieval_id AND pr.project_id = ?
+           WHERE ec.project_id = ? ORDER BY r.retrieved_at DESC""",
+        (project_id, project_id),
+    ).fetchall()
+    return [{
+        "retrieval_id": row[0], "source": row[1], "external_id": row[2], "retrieved_at": row[3],
+        "snapshot": json.loads(row[4]), "relevance": row[5], "parser_run_id": row[6],
+    } for row in rows]
+
+
+def save_project_note(conn: Any, project_id: str, question: str, note_text: str, citations: list[dict], created_by: str) -> dict:
+    if not has_project_access(conn, project_id, created_by):
+        raise ValueError("project access denied")
+    if not note_text.strip():
+        raise ValueError("note_text must not be empty")
+    note = {"note_id": str(uuid.uuid4()), "project_id": project_id, "question": question.strip(), "note_text": note_text.strip(), "citations": citations, "created_by": created_by, "created_at": _now()}
+    conn.execute("INSERT INTO project_notes (note_id, project_id, question, note_text, citations, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (note["note_id"], project_id, note["question"], note["note_text"], json.dumps(citations), created_by, note["created_at"]))
+    conn.commit()
+    return note
+
+
+def list_project_notes(conn: Any, project_id: str, owner_id: str) -> list[dict]:
+    if not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
+    rows = conn.execute("SELECT note_id, question, note_text, citations, created_by, created_at FROM project_notes WHERE project_id = ? ORDER BY created_at DESC", (project_id,)).fetchall()
+    return [{"note_id": row[0], "question": row[1], "note_text": row[2], "citations": json.loads(row[3]), "created_by": row[4], "created_at": row[5]} for row in rows]
+
+
 def create_watch(
     conn: Any,
     project_id: str,
@@ -515,7 +566,7 @@ def get_project_report(conn: Any, project_id: str, owner_id: str | None = None) 
         (project_id,),
     ).fetchall()
     parser_runs = conn.execute(
-        """SELECT parser_run_id, filename, parser_model, source_hash, status,
+        """SELECT parser_run_id, filename, parser_model, source_hash, retrieval_id, status,
                   block_count, created_by, created_at
            FROM parser_runs WHERE project_id = ? ORDER BY created_at DESC""",
         (project_id,),
@@ -527,12 +578,14 @@ def get_project_report(conn: Any, project_id: str, owner_id: str | None = None) 
             "owner_id": project_row[4], "organization_id": project_row[5],
         },
         "collections": [get_collection(conn, row[0]) for row in collection_ids],
+        "papers": list_project_retrievals(conn, project_id, project_row[4]),
+        "notes": list_project_notes(conn, project_id, project_row[4]),
         "claims": [trace_claim(conn, row[0]) for row in claim_ids],
         "parser_runs": [
             {
                 "parser_run_id": row[0], "filename": row[1], "parser_model": row[2],
-                "source_hash": row[3], "status": row[4], "block_count": row[5],
-                "created_by": row[6], "created_at": row[7],
+                "source_hash": row[3], "retrieval_id": row[4], "status": row[5], "block_count": row[6],
+                "created_by": row[7], "created_at": row[8],
             }
             for row in parser_runs
         ],

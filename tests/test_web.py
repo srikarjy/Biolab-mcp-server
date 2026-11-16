@@ -40,7 +40,7 @@ def test_huggingface_parser_api_persists_and_flushes(monkeypatch, tmp_path):
     assert detail.json()["blocks"][0]["review_state"] == "pending"
     assert reviewed.status_code == 200
     assert reviewed.json()["review_state"] == "accepted"
-    assert flushed.json()["flushed_parsed_blocks"] == 1
+    assert flushed.json()["preserved_parsed_blocks"] == 1
 
 
 def test_parsed_documents_live_inside_project_folder_and_download(monkeypatch, tmp_path):
@@ -69,6 +69,30 @@ def test_parsed_documents_live_inside_project_folder_and_download(monkeypatch, t
     assert download.status_code == 200
     assert download.headers["content-disposition"].endswith('"paper.parsed.json"')
     assert download.json()["blocks"][0]["text"] == "Stored evidence"
+
+
+def test_selected_mcp_paper_flows_into_project_parser_and_notes(tmp_path):
+    app = create_app(tmp_path / "selected-paper.db")
+    with TestClient(app) as client:
+        project = client.post("/v1/projects", json={"name": "Paper RAG"}).json()
+        record = retrieval_log.write_retrieval(
+            app.state.conn, "KRAS", "PMID-1", "api:user", "pubmed", {"url": "https://example.test/paper"},
+            '{"title":"KRAS study","abstract":"Methods used a cohort. Results improved."}',
+            {"title": "KRAS study", "abstract": "Methods used a cohort. Results improved."},
+        )
+        selected = client.post(f"/v1/projects/{project['project_id']}/retrievals", json={"retrieval_id": record.retrieval_id})
+        papers = client.get(f"/v1/projects/{project['project_id']}/retrievals")
+        parsed = client.post(f"/v1/projects/{project['project_id']}/retrievals/{record.retrieval_id}/parse")
+        notes = client.post(f"/v1/projects/{project['project_id']}/rag/notes", json={"question": "What changed?", "note_text": "The reviewed result improved.", "citations": [{"block_id": parsed.json()["blocks"][0]["block_id"]}]})
+        report = client.get(f"/v1/projects/{project['project_id']}/report")
+
+    assert selected.status_code == 201
+    assert papers.json()["retrievals"][0]["retrieval_id"] == record.retrieval_id
+    assert parsed.status_code == 201
+    assert parsed.json()["retrieval_id"] == record.retrieval_id
+    assert notes.status_code == 201
+    assert report.json()["papers"][0]["retrieval_id"] == record.retrieval_id
+    assert report.json()["notes"][0]["note_text"] == "The reviewed result improved."
 def test_search_api_uses_shared_service(monkeypatch, tmp_path):
     captured = {}
 
@@ -349,6 +373,21 @@ def test_project_report_api_supports_json_and_markdown(tmp_path):
     assert markdown_report.text.startswith("# Report")
     assert pdf_report.status_code == 200
     assert pdf_report.content.startswith(b"%PDF-1.4")
+
+
+def test_project_click_opens_dedicated_workspace_page(tmp_path):
+    app = create_app(tmp_path / "workspace-page.db")
+    with TestClient(app) as client:
+        project = client.post("/v1/projects", json={"name": "Workspace page"}).json()
+        page = client.get(f"/projects/{project['project_id']}")
+        missing = client.get("/projects/not-a-project")
+
+    assert page.status_code == 200
+    assert "Selected MCP papers" in page.text
+    assert "Parsed papers and review gate" in page.text
+    assert 'type="file"' not in page.text.lower()
+    assert ">upload<" not in page.text.lower()
+    assert missing.status_code == 404
 
 
 def test_authenticated_projects_are_isolated_by_owner(tmp_path):
