@@ -170,6 +170,6 @@ func TestLegacyDatabaseUpgrades(t *testing.T) {
 		t.Fatalf("legacy row should be hash_version 1, got %d (%v)", version, err)
 	}
 	l := NewLog(database)
-	defer l.Close()
+	defer func() { _ = l.Close() }()
 	write(t, l, 1) // new writes still work on the upgraded table
 }
