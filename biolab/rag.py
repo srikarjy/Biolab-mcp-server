@@ -2,20 +2,35 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import uuid
 from typing import Any
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from biolab import embedding_client
+
+
+def _normalize_dsn(dsn: str | None) -> str | None:
+    """Remove connection options unsupported by older local libpq builds."""
+    if not dsn or not dsn.startswith(("postgres://", "postgresql://")):
+        return dsn
+    parsed = urlsplit(dsn)
+    query = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "channel_binding"]
+    if not any(key == "connect_timeout" for key, _value in query):
+        query.append(("connect_timeout", os.environ.get("BIOLAB_PGVECTOR_CONNECT_TIMEOUT_SECONDS", "10")))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
 
 
 class PgVectorStore:
     """Small pgvector adapter; construction fails clearly when not configured."""
 
     def __init__(self, dsn: str | None = None, dimension: int | None = None) -> None:
-        self.dsn = dsn or os.environ.get("DATABASE_URL") or os.environ.get("PGVECTOR_DATABASE_URL")
-        self.dimension = dimension or int(os.environ.get("BIOLAB_EMBEDDING_DIMENSION", "1536"))
+        self.dsn = _normalize_dsn(dsn or os.environ.get("DATABASE_URL") or os.environ.get("PGVECTOR_DATABASE_URL"))
+        self.dimension = dimension or embedding_client.dimension()
+        self.embedding_model = embedding_client.model_name()
+        self.embedding_revision = os.environ.get("BIOLAB_EMBEDDING_REVISION", "unspecified")
         if not self.dsn:
             raise RuntimeError("DATABASE_URL or PGVECTOR_DATABASE_URL is not configured")
         try:
@@ -23,7 +38,6 @@ class PgVectorStore:
         except ImportError as exc:
             raise RuntimeError("pgvector storage requires: pip install 'biolab-mcp[pgvector]'") from exc
         self.conn = psycopg.connect(self.dsn)
-
     def ensure_schema(self) -> None:
         with self.conn.cursor() as cur:
             cur.execute("CREATE EXTENSION IF NOT EXISTS vector")
@@ -38,13 +52,26 @@ class PgVectorStore:
             )
             cur.execute(
                 f"""CREATE TABLE IF NOT EXISTS biolab_parser_chunks (
-                    chunk_id TEXT PRIMARY KEY, parser_run_id TEXT NOT NULL,
+                    chunk_id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+                    document_id TEXT NOT NULL, parser_run_id TEXT NOT NULL,
                     block_id TEXT NOT NULL, page_number INTEGER NOT NULL,
-                    block_type TEXT NOT NULL, chunk_text TEXT NOT NULL,
+                    section_name TEXT NOT NULL, block_type TEXT NOT NULL, chunk_text TEXT NOT NULL,
+                    content_hash TEXT NOT NULL, review_state TEXT NOT NULL DEFAULT 'accepted',
+                    embedding_model TEXT NOT NULL, embedding_revision TEXT NOT NULL,
+                    embedding_dimension INTEGER NOT NULL,
                     embedding vector({self.dimension}) NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
                 )"""
             )
+            cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS project_id TEXT")
+            cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS document_id TEXT")
+            cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS section_name TEXT DEFAULT 'unknown'")
+            cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS content_hash TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS review_state TEXT DEFAULT 'accepted'")
+            cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS embedding_model TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS embedding_revision TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS embedding_dimension INTEGER")
+            cur.execute("CREATE INDEX IF NOT EXISTS idx_biolab_parser_chunks_project ON biolab_parser_chunks(project_id)")
         self.conn.commit()
 
     def upsert(self, chunks: list[dict[str, Any]]) -> int:
@@ -80,23 +107,41 @@ class PgVectorStore:
         self.conn.commit()
         return count
 
-    def upsert_parser_blocks(self, parser_run_id: str, blocks: list[dict[str, Any]]) -> int:
+    def upsert_parser_blocks(self, project_id: str, document_id: str, parser_run_id: str, blocks: list[dict[str, Any]]) -> int:
         """Vectorize page-aware parser blocks without mixing them with claims."""
         self.ensure_schema()
-        texts = [str(block["text"]).strip() for block in blocks if str(block.get("text", "")).strip()]
+        indexed_blocks = [block for block in blocks if str(block.get("text", "")).strip()]
+        texts = [str(block["text"]).strip() for block in indexed_blocks]
         if not texts:
             return 0
         vectors = embedding_client.embed(texts)
+        if len(vectors) != len(indexed_blocks):
+            raise ValueError("embedding provider returned the wrong number of vectors")
+        if any(len(vector) != self.dimension for vector in vectors):
+            raise ValueError(f"embedding dimension must be {self.dimension}")
         with self.conn.cursor() as cur:
             for block, vector in zip(
-                [block for block in blocks if str(block.get("text", "")).strip()], vectors, strict=True
+                indexed_blocks, vectors, strict=True
             ):
+                content_hash = block.get("content_hash") or hashlib.sha256(str(block["text"]).encode()).hexdigest()
                 cur.execute(
                     """INSERT INTO biolab_parser_chunks
-                       (chunk_id, parser_run_id, block_id, page_number, block_type, chunk_text, embedding)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s::vector)
-                       ON CONFLICT (chunk_id) DO UPDATE SET chunk_text=excluded.chunk_text, embedding=excluded.embedding""",
-                    (str(uuid.uuid4()), parser_run_id, block["block_id"], block["page_number"], block["block_type"], block["text"], str(vector)),
+                       (chunk_id, project_id, document_id, parser_run_id, block_id, page_number,
+                        section_name, block_type, chunk_text, content_hash, review_state,
+                        embedding_model, embedding_revision, embedding_dimension, embedding)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)
+                       ON CONFLICT (chunk_id) DO UPDATE SET
+                         project_id=excluded.project_id, document_id=excluded.document_id,
+                         parser_run_id=excluded.parser_run_id, page_number=excluded.page_number,
+                         section_name=excluded.section_name, block_type=excluded.block_type,
+                         chunk_text=excluded.chunk_text, content_hash=excluded.content_hash,
+                         review_state=excluded.review_state, embedding_model=excluded.embedding_model,
+                         embedding_revision=excluded.embedding_revision,
+                         embedding_dimension=excluded.embedding_dimension, embedding=excluded.embedding""",
+                    (block["block_id"], project_id, document_id, parser_run_id, block["block_id"],
+                     block["page_number"], block.get("section_name", "unknown"), block["block_type"],
+                     block["text"], content_hash, "accepted", self.embedding_model,
+                     self.embedding_revision, self.dimension, str(vector)),
                 )
         self.conn.commit()
         return len(texts)
@@ -108,6 +153,36 @@ class PgVectorStore:
             count = cur.rowcount
         self.conn.commit()
         return count
+
+    def flush_parser_block(self, block_id: str) -> int:
+        self.ensure_schema()
+        with self.conn.cursor() as cur:
+            cur.execute("DELETE FROM biolab_parser_chunks WHERE block_id = %s", (block_id,))
+            count = cur.rowcount
+        self.conn.commit()
+        return count
+
+    def search_parser(self, project_id: str, embedding: list[float], top_k: int = 8, sections: list[str] | None = None) -> list[dict[str, Any]]:
+        self.ensure_schema()
+        with self.conn.cursor() as cur:
+            section_filter = ""
+            params: list[Any] = [str(embedding), project_id]
+            if sections:
+                section_filter = " AND section_name = ANY(%s)"
+                params.append(sections)
+            params.extend([str(embedding), top_k])
+            cur.execute(
+                f"""SELECT chunk_id, project_id, document_id, parser_run_id, block_id,
+                          page_number, section_name, block_type, chunk_text, content_hash,
+                          embedding_model, embedding_revision, embedding_dimension,
+                          1 - (embedding <=> %s::vector) AS similarity
+                   FROM biolab_parser_chunks
+                   WHERE project_id = %s AND review_state = 'accepted'{section_filter}
+                   ORDER BY embedding <=> %s::vector LIMIT %s""",
+                params,
+            )
+            columns = [column.name for column in (cur.description or [])]
+            return [dict(zip(columns, row, strict=True)) for row in cur.fetchall()]
 
 
 def retrieve_context(question: str, inference_run_id: str, evidence: list[dict[str, Any]], top_k: int = 8) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -146,14 +221,16 @@ def flush_context(inference_run_id: str) -> int:
     return PgVectorStore().flush_run(inference_run_id)
 
 
-def index_parser_blocks(parser_run_id: str, blocks: list[dict[str, Any]]) -> dict[str, Any]:
+def index_parser_blocks(project_id: str, document_id: str, parser_run_id: str, blocks: list[dict[str, Any]]) -> dict[str, Any]:
     """Index parser output when the optional embedding and pgvector services exist."""
     if not embedding_client.configured():
         return {"status": "disabled", "reason": "embedding provider not configured", "indexed_blocks": 0}
     try:
-        count = PgVectorStore().upsert_parser_blocks(parser_run_id, blocks)
+        count = PgVectorStore().upsert_parser_blocks(project_id, document_id, parser_run_id, blocks)
     except RuntimeError as exc:
         return {"status": "disabled", "reason": str(exc), "indexed_blocks": 0}
+    except Exception as exc:
+        return {"status": "unavailable", "reason": str(exc), "indexed_blocks": 0}
     return {"status": "active", "indexed_blocks": count}
 
 
@@ -162,3 +239,22 @@ def flush_parser_context(parser_run_id: str) -> int:
     if not (os.environ.get("DATABASE_URL") or os.environ.get("PGVECTOR_DATABASE_URL")):
         return 0
     return PgVectorStore().flush_parser_run(parser_run_id)
+
+
+def flush_parser_block(block_id: str) -> int:
+    if not (os.environ.get("DATABASE_URL") or os.environ.get("PGVECTOR_DATABASE_URL")):
+        return 0
+    return PgVectorStore().flush_parser_block(block_id)
+
+
+def search_parser_context(project_id: str, question: str, top_k: int = 8, sections: list[str] | None = None) -> dict[str, Any]:
+    if not question.strip():
+        raise ValueError("question must not be empty")
+    if top_k < 1 or top_k > 50:
+        raise ValueError("top_k must be between 1 and 50")
+    if sections is not None and (not sections or any(not section.strip() for section in sections)):
+        raise ValueError("sections must contain non-empty names")
+    if not embedding_client.configured():
+        return {"status": "disabled", "reason": "embedding provider not configured", "chunks": []}
+    vector = embedding_client.embed([question])[0]
+    return {"status": "active", "sections": sections or [], "chunks": PgVectorStore().search_parser(project_id, vector, top_k, sections)}

@@ -310,21 +310,36 @@ HF_PARSER_ENDPOINT=https://your-inference-endpoint
 HF_PARSER_MODEL=nvidia/Nemotron-3.5-Parse
 ```
 
+For a no-API-key local embedding path, install the optional model runtime and
+use BGE-small locally:
+
+```bash
+pip install -e ".[pgvector,local-embeddings]"
+export BIOLAB_LOCAL_EMBEDDINGS=1
+export BIOLAB_LOCAL_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+export BIOLAB_EMBEDDING_DIMENSION=384
+```
+
+The model runs on the local machine; Neon stores only reviewed vectors and
+metadata. The first run downloads the model weights. Local embeddings are a
+retrieval component, not biological validation.
+
 Parse a PDF through the Hugging Face backend by sending base64 content to
 `POST /v1/parser/parse`. The response contains page-aware blocks with block
 types, bounding boxes, content hashes, and the selected parser model. Inspect
-it with `GET /v1/parser/runs/{parser_run_id}` and remove disposable parsed
+it with `GET /v1/parser/runs/{parser_run_id}` and remove disposable vector
 blocks with `POST /v1/parser/runs/{parser_run_id}/flush`. The parser endpoint
 must be a Hugging Face Inference Endpoint or Space wrapper capable of rendering
 PDF pages for the selected model.
 
 When the optional pgvector path is configured (`DATABASE_URL` or
 `PGVECTOR_DATABASE_URL`, plus `BIOLAB_EMBEDDING_API_URL` and
-`BIOLAB_EMBEDDING_API_KEY`), each non-empty parsed block is also stored in the
-separate `biolab_parser_chunks` vector table with its parser run, page number,
-block type, and text. Flushing a parser run removes both its local parsed blocks
-and its cloud vector chunks while preserving parser-run metadata and reviewed
-citations.
+`BIOLAB_EMBEDDING_API_KEY`), each parsed block explicitly accepted by a
+scientist is stored in the separate `biolab_parser_chunks` vector table with its
+parser run, page number, section, block type, and text. Flushing a parser run
+removes its cloud vector chunks while preserving local parsed blocks, review
+decisions, and parser-run metadata so the index can be rebuilt without
+uploading the PDF again.
 
 When `DEEPSEEK_API_KEY` is present, inference uses DeepSeek’s structured
 grounded-generation path. When the database and embedding provider are also
@@ -341,6 +356,30 @@ list that project’s parsed documents and `GET /v1/parser/runs/{parser_run_id}/
 to download the page-aware parsed JSON. Project ownership is checked at each
 read, download, and flush boundary; the raw PDF is not retained by this parser
 endpoint.
+
+Project-scoped semantic retrieval is available at
+`POST /v1/projects/{project_id}/rag/search`. It searches only vectors belonging
+to that project and returns document, parser-run, block, page, section, and
+similarity metadata. Pass `sections: ["results", "methods"]` to constrain
+retrieval to specific scientific sections. The endpoint reports `disabled` until both an embedding
+provider and pgvector database are configured; it never silently falls back to
+cross-project or unindexed data.
+
+The pgvector path can be tested for free locally with Docker and deterministic
+embeddings. Start `docker compose -f docker-compose.rag.yml up -d`, install the
+optional driver with `pip install -e ".[pgvector,dev]"`, then run
+`BIOLAB_PGVECTOR_INTEGRATION=1 PGVECTOR_DATABASE_URL=postgresql://biolab:biolab@127.0.0.1:54329/biolab pytest tests/test_rag_pgvector.py -m integration -v`.
+Stop the container with `docker compose -f docker-compose.rag.yml down`.
+
+Parsed blocks start as `pending`. A scientist must call
+`POST /v1/parser/runs/{parser_run_id}/blocks/{block_id}/review` with
+`{"review_state":"accepted"}` before that block is embedded into pgvector.
+`excluded` blocks remain in the audit record but are removed from the vector
+index.
+
+Use `POST /v1/parser/runs/{parser_run_id}/rebuild-index` to recreate the
+project vector projection from accepted local blocks after a flush or embedding
+model change.
 
 For durable hosted storage, install the optional Turso dependency and configure
 both variables:

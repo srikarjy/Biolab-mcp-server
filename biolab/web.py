@@ -22,6 +22,7 @@ from biolab import (
     evidence,
     exports,
     inference,
+    rag,
     ranking,
     retrieval_log,
     workspace,
@@ -46,7 +47,13 @@ OPENAPI_SCHEMA = {
         "/v1/inferences/{inference_run_id}/flush": {"post": {"summary": "Flush disposable parser chunks"}},
         "/v1/parser/parse": {"post": {"summary": "Parse a PDF through the configured Hugging Face parser"}},
         "/v1/projects/{project_id}/parser-runs": {"get": {"summary": "List parsed documents in a project folder"}},
+        "/v1/projects/{project_id}/retrievals": {"get": {"summary": "List MCP papers selected for a project"}},
+        "/v1/projects/{project_id}/retrievals/{retrieval_id}/parse": {"post": {"summary": "Parse a selected MCP paper into the project"}},
+        "/v1/projects/{project_id}/rag/search": {"post": {"summary": "Search project-scoped parsed RAG chunks"}},
+        "/v1/projects/{project_id}/rag/notes": {"get": {"summary": "List saved project RAG notes"}, "post": {"summary": "Save an important RAG note"}},
         "/v1/parser/runs/{parser_run_id}": {"get": {"summary": "Inspect parsed document blocks"}},
+        "/v1/parser/runs/{parser_run_id}/rebuild-index": {"post": {"summary": "Rebuild project RAG vectors from accepted blocks"}},
+        "/v1/parser/runs/{parser_run_id}/blocks/{block_id}/review": {"post": {"summary": "Accept or exclude a parsed block for RAG"}},
         "/v1/parser/runs/{parser_run_id}/flush": {"post": {"summary": "Flush parsed document blocks"}},
         "/v1/parser/runs/{parser_run_id}/download": {"get": {"summary": "Download parsed document JSON"}},
         "/v1/retrievals/{retrieval_id}": {"get": {"summary": "Fetch a preserved retrieval"}},
@@ -79,6 +86,47 @@ OPENAPI_SCHEMA = {
         "/a2a": {"post": {"summary": "A2A JSON-RPC endpoint"}},
     },
 }
+
+PROJECT_PAGE_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Project workspace · Biolab</title>
+  <style>
+    :root{--ink:#10212b;--muted:#61747d;--line:#d9e4e5;--paper:#f7faf8;--card:#fff;--teal:#087f78;--dark:#075e5a}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 90% 0%,#dff7e7 0,transparent 30rem),var(--paper);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,sans-serif}
+    .shell{width:min(1120px,calc(100% - 40px));margin:auto;padding:28px 0 64px}.top{display:flex;justify-content:space-between;align-items:center;margin-bottom:48px}.brand{font-weight:800}.back{color:var(--dark);font-size:.85rem;font-weight:800;text-decoration:none}.eyebrow{color:var(--teal);font-size:.72rem;font-weight:800;letter-spacing:.14em;text-transform:uppercase}h1{margin:8px 0;font-size:clamp(2.2rem,5vw,4.4rem);letter-spacing:-.06em;line-height:1}.lede{color:var(--muted);line-height:1.6}.grid{display:grid;grid-template-columns:1.15fr .85fr;gap:18px;margin-top:30px}.panel{padding:24px;border:1px solid var(--line);border-radius:20px;background:var(--card);box-shadow:0 18px 50px #174d3d0d}.panel h2{margin:0;font-size:1.1rem}.sub{color:var(--muted);font-size:.82rem;line-height:1.45}.list{display:grid;gap:10px;margin-top:16px}.item{padding:13px;border:1px solid var(--line);border-radius:13px;background:#fbfdfc;font-size:.8rem;line-height:1.45}.item strong{display:block;margin-bottom:4px}.meta{color:var(--muted);font-size:.72rem}.actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:10px}button{padding:.55rem .7rem;border:1px solid var(--teal);border-radius:9px;color:#fff;background:var(--teal);font:inherit;font-size:.72rem;font-weight:800;cursor:pointer}button.secondary{color:var(--dark);background:#edf8f0;border-color:#cde9d6}button:disabled{opacity:.6;cursor:wait}.query{display:grid;gap:9px;margin-top:14px}input{width:100%;padding:.75rem;border:1px solid var(--line);border-radius:10px;font:inherit}.empty{padding:18px;border:1px dashed #bfd4cb;border-radius:12px;color:var(--muted);font-size:.8rem}.chunk{padding:11px;border-top:1px solid var(--line);font-size:.78rem;line-height:1.5}.chunk:first-child{border-top:0}.status{margin-top:12px;color:var(--dark);font-size:.78rem}.error{color:#9b4539}.wide{grid-column:1/-1}@media(max-width:800px){.shell{width:min(100% - 24px,1120px)}.grid{grid-template-columns:1fr}.top{margin-bottom:32px}}
+  </style>
+</head>
+<body><main class="shell">
+  <nav class="top"><span class="brand">biolab / project workspace</span><a class="back" href="/">← Evidence search</a></nav>
+  <header><p class="eyebrow">Project workspace · Step 02</p><h1 id="title">Loading project…</h1><p class="lede" id="description">Loading the selected project and its preserved evidence.</p></header>
+  <div class="grid">
+    <section class="panel"><h2>Selected MCP papers</h2><p class="sub">These are preserved retrievals selected from the evidence search page. Parsing uses the saved record; there is no upload step.</p><div id="papers" class="list"><div class="empty">Loading selected papers…</div></div></section>
+    <section class="panel"><h2>Query the paper RAG</h2><p class="sub">Only reviewed parser blocks can be returned here.</p><form id="query-form" class="query"><input id="question" required placeholder="What does this paper report about KRAS?"><button>Search reviewed passages</button></form><div id="rag" class="list"><div class="empty">Ask a question after indexing reviewed blocks.</div></div><div id="notes" class="list"></div></section>
+    <section class="panel wide"><h2>Parsed papers and review gate</h2><p class="sub">Inspect parser blocks, accept useful passages for the RAG, or exclude them.</p><div id="runs" class="list"><div class="empty">Loading parser runs…</div></div></section>
+  </div>
+</main>
+<script>
+const projectId=decodeURIComponent(location.pathname.split('/').filter(Boolean).pop());
+const $=id=>document.getElementById(id);
+const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||('Request failed '+r.status));return d}
+async function load(){
+  try{const report=await api('/v1/projects/'+encodeURIComponent(projectId)+'/report');const p=report.project||{};$('title').textContent=p.name||'Project workspace';$('description').textContent=p.description||'Selected scientific evidence, parser review, and paper-grounded retrieval.';await Promise.all([papers(),runs(),notes()]);}
+  catch(e){$('description').innerHTML='<span class="error">'+esc(e.message)+'</span>'}
+}
+async function papers(){const d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/retrievals');const rows=d.retrievals||[];$('papers').innerHTML=rows.length?rows.map(x=>{const s=x.snapshot||{};return '<article class="item"><strong>'+esc(s.title||s.name||x.external_id)+'</strong><span class="meta">'+esc(x.source)+' · '+esc(x.external_id)+'</span><div class="actions"><button data-parse="'+esc(x.retrieval_id)+'">Parse saved paper</button></div></article>'}).join(''):'<div class="empty">No papers selected yet. Return to evidence search and select a preserved result.</div>'}
+async function runs(){const d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/parser-runs');const rows=d.parser_runs||[];$('runs').innerHTML=rows.length?rows.map(x=>'<article class="item" data-run="'+esc(x.parser_run_id)+'"><strong>'+esc(x.title||x.source_name||'Parsed paper')+'</strong><span class="meta">'+esc(x.status||x.review_state||'parsed')+' · '+esc(x.parser_run_id)+'</span><div class="actions"><button class="secondary" data-inspect="'+esc(x.parser_run_id)+'">Inspect blocks</button></div><div class="blocks"></div></article>').join(''):'<div class="empty">No parsed papers yet. Parse one of the selected papers above.</div>'}
+async function notes(){const d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/rag/notes');const rows=d.notes||[];$('notes').innerHTML=rows.length?'<h3>Saved notes</h3>'+rows.map(x=>'<article class="item"><strong>'+esc(x.note_text)+'</strong><span class="meta">'+esc(x.question||'Saved from RAG')}</span></article>').join(''):''}
+document.addEventListener('click',async e=>{const parse=e.target.closest('[data-parse]'),inspect=e.target.closest('[data-inspect]'),review=e.target.closest('[data-review]');try{
+  if(parse){parse.disabled=true;await api('/v1/projects/'+encodeURIComponent(projectId)+'/retrievals/'+encodeURIComponent(parse.dataset.parse)+'/parse',{method:'POST'});await runs()}
+  if(inspect){const run=inspect.closest('[data-run]'),d=await api('/v1/parser/runs/'+encodeURIComponent(inspect.dataset.inspect));run.querySelector('.blocks').innerHTML=(d.blocks||[]).map(b=>'<div class="chunk"><strong>Page '+esc(b.page_number)+' · '+esc(b.section_name)+' · '+esc(b.review_state)+'</strong><br>'+esc(b.text)+'<div class="actions"><button class="secondary" data-review="accepted" data-run="'+esc(b.parser_run_id)+'" data-block="'+esc(b.block_id)+'">Accept for RAG</button><button class="secondary" data-review="excluded" data-run="'+esc(b.parser_run_id)+'" data-block="'+esc(b.block_id)+'">Exclude</button></div></div>').join('')||'<div class="empty">No blocks.</div>'}
+  if(review){review.disabled=true;await api('/v1/parser/runs/'+encodeURIComponent(review.dataset.run)+'/blocks/'+encodeURIComponent(review.dataset.block)+'/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({review_state:review.dataset.review})});review.textContent='Saved';}
+}catch(e){alert(e.message)}});
+$('query-form').addEventListener('submit',async e=>{e.preventDefault();$('rag').innerHTML='<div class="empty">Searching…</div>';try{const q=$('question').value.trim(),d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/rag/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,top_k:8})});if(d.status==='disabled'){$('rag').innerHTML='<div class="empty">RAG is not active: '+esc(d.reason)+'</div>';return}$('rag').innerHTML=(d.chunks||[]).map(x=>'<article class="chunk"><strong>Page '+esc(x.page_number)+' · '+esc(x.section_name)+'</strong><br>'+esc(x.chunk_text)+'</article>').join('')||'<div class="empty">No reviewed passages matched.</div>'}catch(e){$('rag').innerHTML='<div class="empty error">'+esc(e.message)+'</div>'}});
+load();
+</script></body></html>"""
 
 DASHBOARD_HTML = r"""<!doctype html>
 <html lang="en">
@@ -135,6 +183,19 @@ DASHBOARD_HTML = r"""<!doctype html>
     .project-detail { margin-top: 12px; padding: 12px; border-radius: 12px; color: #536970; background: #f7faf8; font-size: .76rem; line-height: 1.5; }
     .project-detail strong { color: var(--ink); }
     .project-detail a { color: var(--teal-dark); font-weight: 800; }
+    .project-detail hr { margin: 14px 0; border: 0; border-top: 1px solid var(--line); }
+    .paper-list, .rag-results, .saved-notes { display: grid; gap: 8px; margin-top: 10px; }
+    .paper-card, .rag-chunk, .saved-note { padding: 9px; border: 1px solid var(--line); border-radius: 9px; background: #fff; font-size: .72rem; line-height: 1.4; }
+    .paper-card button, .rag-query button { min-height: 28px; padding: .3rem .5rem; font-size: .66rem; }
+    .rag-query { display: grid; gap: 7px; margin-top: 10px; }
+    .rag-query input { min-height: 34px; padding: .5rem; font-size: .72rem; }
+    .parser-run { margin-top: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+    .parser-run-head { display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+    .parser-run-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .parser-run-actions button { min-height: 30px; padding: .35rem .55rem; font-size: .68rem; }
+    .parser-block { margin-top: 8px; padding: 8px; border-radius: 8px; background: #f7faf8; font-size: .72rem; line-height: 1.4; }
+    .parser-block-actions { display: flex; gap: 5px; margin-top: 6px; }
+    .parser-block-actions button { min-height: 26px; padding: .25rem .45rem; font-size: .65rem; }
     .results-section { margin-top: 44px; }
     .results-head { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: 16px; }
     .summary { margin: 5px 0 0; color: var(--muted); font-size: .83rem; }
@@ -396,6 +457,44 @@ DASHBOARD_HTML = r"""<!doctype html>
         ? result.projects.map(p => `<li><button class="project-item" type="button" data-project-id="${escapeHtml(p.project_id)}"><strong>${escapeHtml(p.name)}</strong><code>${escapeHtml(maskId(p.project_id))}</code></button></li>`).join('')
         : '<li class="muted">No projects yet.</li>';
     }
+    const bytesToBase64 = (bytes) => {
+      let binary = '';
+      for (let index = 0; index < bytes.length; index += 0x8000) binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+      return btoa(binary);
+    };
+    async function loadParserRuns(projectId) {
+      const container = document.querySelector('[data-parser-runs]');
+      if (!container) return;
+      const response = await apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/parser-runs`);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `Parser list returned ${response.status}`);
+      container.innerHTML = result.parser_runs.length ? result.parser_runs.map(run => `<article class="parser-run" data-run-id="${escapeHtml(run.parser_run_id)}">
+        <div class="parser-run-head"><strong>${escapeHtml(run.filename)}</strong><span class="badge">${escapeHtml(run.status)}</span></div>
+        <div class="muted">${run.block_count} blocks · ${escapeHtml(run.parser_model)} · ${run.retrieval_id ? `MCP paper ${escapeHtml(maskId(run.retrieval_id))}` : 'project document'}</div>
+        <div class="parser-run-actions"><a href="${apiBase}/v1/parser/runs/${encodeURIComponent(run.parser_run_id)}/download" target="_blank" rel="noreferrer">Download parsed JSON ↗</a>
+          <button class="secondary" type="button" data-parser-inspect="${escapeHtml(run.parser_run_id)}">Inspect blocks</button>
+          <button class="secondary" type="button" data-parser-rebuild="${escapeHtml(run.parser_run_id)}">Rebuild RAG index</button></div>
+        <div data-parser-output hidden></div></article>`).join('') : '<div class="muted">No papers yet. Upload a PDF or text file above.</div>';
+    }
+    async function loadProjectPapers(projectId) {
+      const container = document.querySelector('[data-project-papers]');
+      const notes = document.querySelector('[data-project-notes]');
+      if (!container) return;
+      const response = await apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/retrievals`);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `Paper list returned ${response.status}`);
+      container.innerHTML = result.retrievals.length ? result.retrievals.map(paper => {
+        const snap = paper.snapshot || {};
+        const title = snap.title || snap.name || snap.primary_accession || paper.external_id;
+        return `<article class="paper-card"><strong>${escapeHtml(title)}</strong><br><span class="muted">${escapeHtml(paper.source)} · ${escapeHtml(paper.external_id)} · ${escapeHtml(paper.relevance)}</span><br>
+          ${paper.parser_run_id ? `<span class="badge">Parsed into project</span>` : `<button class="secondary" type="button" data-paper-parse="${escapeHtml(paper.retrieval_id)}">Parse this MCP paper</button>`}</article>`;
+      }).join('') : '<div class="muted">No MCP papers selected yet. Search above, accept a result, then select it for this project.</div>';
+      if (notes) {
+        const noteResponse = await apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/rag/notes`);
+        const noteResult = await noteResponse.json();
+        notes.innerHTML = noteResult.notes?.length ? noteResult.notes.map(note => `<article class="saved-note"><strong>${escapeHtml(note.note_text)}</strong><br><span class="muted">${escapeHtml(note.question)} · ${escapeHtml(note.created_at)}</span></article>`).join('') : '<div class="muted">No saved RAG notes yet.</div>';
+      }
+    }
     async function loadProject(projectId) {
       latestProjectId = projectId;
       saveReviewed.disabled = !(latestRanking?.candidates?.some(candidate => candidate.review_state === 'accepted'));
@@ -416,13 +515,82 @@ DASHBOARD_HTML = r"""<!doctype html>
           ${escapeHtml(project.description || 'No description')}<br>
           ${report.collections.length} collections · ${report.claims.length} claims · ${(report.parser_runs || []).length} parsed documents · ${report.watches.length} watches<br>
           <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report" target="_blank" rel="noreferrer">Open JSON report ↗</a> ·
-          <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report?format=markdown" target="_blank" rel="noreferrer">Open Markdown report ↗</a>`;
+          <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report?format=markdown" target="_blank" rel="noreferrer">Open Markdown report ↗</a>
+          <hr><strong>Selected MCP papers</strong><div class="muted">Choose a preserved paper from the evidence results above. Biolab parses its saved title/abstract into this project; no re-upload is needed.</div>
+          <div class="paper-list" data-project-papers>Loading selected papers…</div>
+          <hr><strong>Query this paper RAG</strong>
+          <form class="rag-query" data-rag-query="${escapeHtml(projectId)}"><input required placeholder="Ask about the selected paper…"><button type="submit">Search reviewed RAG</button></form>
+          <div class="rag-results" data-rag-results></div>
+          <div class="saved-notes" data-project-notes></div>
+          <hr><strong>Parsed documents</strong><div data-parser-runs>Loading parsed papers…</div>`;
+        await loadParserRuns(projectId);
+        await loadProjectPapers(projectId);
       } catch (error) { detail.textContent = String(error); }
     }
     document.querySelector('#verify').addEventListener('click', verify);
     document.querySelector('#projects').addEventListener('click', (event) => {
       const button = event.target.closest('[data-project-id]');
-      if (button) loadProject(button.dataset.projectId);
+      if (button) window.location.href = `/projects/${encodeURIComponent(button.dataset.projectId)}`;
+    });
+    document.querySelector('#project-detail').addEventListener('submit', async (event) => {
+      const form = event.target.closest('[data-rag-query]');
+      if (!form) return;
+      event.preventDefault();
+      const question = form.querySelector('input').value.trim();
+      const output = form.parentElement.querySelector('[data-rag-results]');
+      output.textContent = 'Searching reviewed paper passages…';
+      try {
+        const response = await apiFetch(`/v1/projects/${encodeURIComponent(form.dataset.ragQuery)}/rag/search`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question, top_k: 8})});
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `RAG returned ${response.status}`);
+        if (result.status === 'disabled') { output.innerHTML = `<div class="muted">RAG is not active yet: ${escapeHtml(result.reason)}. Configure an embedding provider and pgvector.</div>`; return; }
+        output.innerHTML = result.chunks?.length ? result.chunks.map(chunk => `<article class="rag-chunk"><strong>Page ${escapeHtml(chunk.page_number)} · ${escapeHtml(chunk.section_name)}</strong><br>${escapeHtml(chunk.chunk_text)}<br><span class="muted">${escapeHtml(chunk.content_hash || chunk.block_id)}</span></article>`).join('') + `<button class="secondary" type="button" data-save-rag-note data-project-id="${escapeHtml(form.dataset.ragQuery)}" data-question="${escapeHtml(question)}">Save these passages as a project note</button>` : '<div class="muted">No reviewed passages matched.</div>';
+      } catch (error) { output.textContent = String(error); }
+    });
+    document.querySelector('#project-detail').addEventListener('click', async (event) => {
+      const inspect = event.target.closest('[data-parser-inspect]');
+      const rebuild = event.target.closest('[data-parser-rebuild]');
+      const review = event.target.closest('[data-parser-review]');
+      try {
+        if (inspect) {
+          const runId = inspect.dataset.parserInspect;
+          const output = inspect.closest('[data-run-id]').querySelector('[data-parser-output]');
+          const response = await apiFetch(`/v1/parser/runs/${encodeURIComponent(runId)}`);
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || `Parser detail returned ${response.status}`);
+          output.hidden = false;
+          output.innerHTML = result.blocks.map(block => `<div class="parser-block"><strong>Page ${escapeHtml(block.page_number)} · ${escapeHtml(block.section_name)} · ${escapeHtml(block.review_state)}</strong><br>${escapeHtml(block.text)}<div class="parser-block-actions"><button class="secondary" type="button" data-parser-review="accepted" data-run-id="${escapeHtml(runId)}" data-block-id="${escapeHtml(block.block_id)}">Accept for RAG</button><button class="secondary" type="button" data-parser-review="excluded" data-run-id="${escapeHtml(runId)}" data-block-id="${escapeHtml(block.block_id)}">Exclude</button></div></div>`).join('') || '<div class="muted">No parsed blocks.</div>';
+        }
+        if (rebuild) {
+          rebuild.disabled = true;
+          const response = await apiFetch(`/v1/parser/runs/${encodeURIComponent(rebuild.dataset.parserRebuild)}/rebuild-index`, {method: 'POST'});
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || `Rebuild returned ${response.status}`);
+          rebuild.textContent = `${result.indexed_blocks ?? 0} indexed`;
+        }
+        if (review) {
+          const response = await apiFetch(`/v1/parser/runs/${encodeURIComponent(review.dataset.runId)}/blocks/${encodeURIComponent(review.dataset.blockId)}/review`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({review_state: review.dataset.parserReview})});
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || `Review returned ${response.status}`);
+          review.parentElement.previousSibling.textContent = `${result.review_state} · ${result.vector_status?.status || 'not indexed'}`;
+          review.disabled = true;
+        }
+        const paper = event.target.closest('[data-paper-parse]');
+        if (paper) {
+          paper.disabled = true;
+          const projectId = latestProjectId;
+          const response = await apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/retrievals/${encodeURIComponent(paper.dataset.paperParse)}/parse`, {method: 'POST'});
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || `Parse returned ${response.status}`);
+          await loadProject(projectId);
+        }
+        const saveNote = event.target.closest('[data-save-rag-note]');
+        if (saveNote) {
+          const response = await apiFetch(`/v1/projects/${encodeURIComponent(saveNote.dataset.projectId)}/rag/notes`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({question: saveNote.dataset.question, note_text: 'Reviewed passages saved from the project RAG query.', citations: []})});
+          if (!response.ok) throw new Error(`Save note returned ${response.status}`);
+          await loadProjectPapers(saveNote.dataset.projectId);
+        }
+      } catch (error) { window.alert(String(error)); }
     });
     document.querySelector('#project-form').addEventListener('submit', async (event) => {
       event.preventDefault();
@@ -478,9 +646,10 @@ DASHBOARD_HTML = r"""<!doctype html>
           const title = snap.title || snap.name || snap.primary_accession || record.external_id;
           const candidateUrl = snap.url || snap.canonical_url || '';
           const url = /^https?:\/\//i.test(candidateUrl) ? candidateUrl : '';
-          return `<article class="evidence-card"><div class="card-meta"><span class="badge">${escapeHtml(record.source)}</span><span class="record-id">${escapeHtml(record.external_id)}</span></div>
+          return `<article class="evidence-card" data-retrieval-id="${escapeHtml(record.retrieval_id)}"><div class="card-meta"><span class="badge">${escapeHtml(record.source)}</span><span class="record-id">${escapeHtml(record.external_id)}</span></div>
             <h3>${escapeHtml(title)}</h3><p>Preserved retrieval <code>${escapeHtml(record.retrieval_id)}</code></p>
-            ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Open source ↗</a>` : ''}</article>`;
+            ${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noreferrer">Open source ↗</a>` : ''}
+            <button class="secondary" type="button" data-select-retrieval="${escapeHtml(record.retrieval_id)}" style="margin-top:10px">Select for project</button></article>`;
         }).join('') || '<div class="empty">No records returned. Check the source selection or broaden the question.</div>';
         if (records.length) {
           rankingSection.hidden = false;
@@ -500,6 +669,19 @@ DASHBOARD_HTML = r"""<!doctype html>
         results.innerHTML = `<div class="empty">${escapeHtml(error)}</div>`;
         rankingSection.hidden = true;
       } finally { button.disabled = false; document.querySelector('#search-label').textContent = 'Search and preserve evidence'; }
+    });
+    results.addEventListener('click', async (event) => {
+      const button = event.target.closest('[data-select-retrieval]');
+      if (!button) return;
+      if (!latestProjectId) { window.alert('Select or create a project first.'); return; }
+      button.disabled = true;
+      try {
+        const response = await apiFetch(`/v1/projects/${encodeURIComponent(latestProjectId)}/retrievals`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({retrieval_id: button.dataset.selectRetrieval})});
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Selection returned ${response.status}`);
+        button.textContent = 'Selected for project';
+        await loadProject(latestProjectId);
+      } catch (error) { button.disabled = false; button.textContent = String(error); }
     });
     verify(); loadProjects();
   </script>
@@ -526,6 +708,14 @@ def _record_payload(record) -> dict:
 
 async def dashboard(_request: Request) -> HTMLResponse:
     return HTMLResponse(DASHBOARD_HTML)
+
+
+async def project_page(request: Request) -> HTMLResponse:
+    project_id = request.path_params["project_id"]
+    report = workspace.get_project_report(request.app.state.conn, project_id, auth.request_identity(request))
+    if report is None:
+        return HTMLResponse("Project not found", status_code=404)
+    return HTMLResponse(PROJECT_PAGE_HTML)
 
 
 async def health(request: Request) -> JSONResponse:
@@ -705,6 +895,60 @@ async def project_parser_runs(request: Request) -> JSONResponse:
     return JSONResponse({"parser_runs": result})
 
 
+async def project_retrievals(request: Request) -> JSONResponse:
+    try:
+        if request.method == "POST":
+            payload = await request.json()
+            saved = workspace.save_retrieval_to_project(request.app.state.conn, request.path_params["project_id"], str(payload.get("retrieval_id", "")), auth.request_identity(request))
+            return JSONResponse(saved, status_code=201)
+        result = workspace.list_project_retrievals(request.app.state.conn, request.path_params["project_id"], auth.request_identity(request))
+    except ValueError:
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    return JSONResponse({"retrievals": result})
+
+
+async def parse_project_retrieval(request: Request) -> JSONResponse:
+    try:
+        result = document_parser.create_parser_run_from_retrieval(
+            request.app.state.conn, request.path_params["project_id"], request.path_params["retrieval_id"], auth.request_identity(request)
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    return JSONResponse(result, status_code=201)
+
+
+async def project_rag_search(request: Request) -> JSONResponse:
+    project_id = request.path_params["project_id"]
+    if not workspace.has_project_access(request.app.state.conn, project_id, auth.request_identity(request)):
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    try:
+        payload = await request.json()
+        sections = payload.get("sections")
+        if sections is not None and (not isinstance(sections, list) or not all(isinstance(section, str) for section in sections)):
+            return JSONResponse({"error": "sections must be a list of strings"}, status_code=400)
+        result = rag.search_parser_context(project_id, str(payload.get("question", "")), int(payload.get("top_k", 8)), sections)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    return JSONResponse(result)
+
+
+async def project_rag_notes(request: Request) -> JSONResponse:
+    project_id = request.path_params["project_id"]
+    owner_id = auth.request_identity(request)
+    try:
+        if request.method == "GET":
+            return JSONResponse({"notes": workspace.list_project_notes(request.app.state.conn, project_id, owner_id)})
+        payload = await request.json()
+        note = workspace.save_project_note(request.app.state.conn, project_id, str(payload.get("question", "")), str(payload.get("note_text", "")), payload.get("citations", []) if isinstance(payload.get("citations", []), list) else [], owner_id)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(note, status_code=201)
+
+
 async def parser_download(request: Request) -> Response:
     try:
         result = document_parser.assert_run_access(request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request))
@@ -715,11 +959,35 @@ async def parser_download(request: Request) -> Response:
     return Response(payload, media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
 
+async def parser_block_review(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        result = document_parser.review_block(
+            request.app.state.conn, request.path_params["parser_run_id"], request.path_params["block_id"],
+            str(payload.get("review_state", "")), auth.request_identity(request), str(payload.get("note", "")),
+        )
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400 if "review_state" in str(exc) else 404)
+    return JSONResponse(result)
+
+
 async def parser_flush(request: Request) -> JSONResponse:
     try:
         result = document_parser.flush_parser_run(request.app.state.conn, document_parser.assert_run_access(request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request))["parser_run_id"])
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
+    return JSONResponse(result)
+
+
+async def parser_rebuild_index(request: Request) -> JSONResponse:
+    try:
+        result = document_parser.rebuild_parser_index(
+            request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request)
+        )
+    except ValueError:
+        return JSONResponse({"error": "parser run not found"}, status_code=404)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
     return JSONResponse(result)
 
 
@@ -966,6 +1234,7 @@ def api_routes() -> list[Route]:
     return [
         *a2a.a2a_routes(),
         Route("/", dashboard),
+        Route("/projects/{project_id}", project_page),
         Route("/health", health),
         Route("/openapi.json", openapi),
         Route("/metrics", metrics),
@@ -978,8 +1247,14 @@ def api_routes() -> list[Route]:
         Route("/v1/inferences/{inference_run_id}/flush", inference_flush, methods=["POST"]),
         Route("/v1/parser/parse", parser_parse, methods=["POST"]),
         Route("/v1/projects/{project_id}/parser-runs", project_parser_runs),
+        Route("/v1/projects/{project_id}/retrievals", project_retrievals, methods=["GET", "POST"]),
+        Route("/v1/projects/{project_id}/retrievals/{retrieval_id}/parse", parse_project_retrieval, methods=["POST"]),
+        Route("/v1/projects/{project_id}/rag/search", project_rag_search, methods=["POST"]),
+        Route("/v1/projects/{project_id}/rag/notes", project_rag_notes, methods=["GET", "POST"]),
         Route("/v1/parser/runs/{parser_run_id}", parser_detail),
+        Route("/v1/parser/runs/{parser_run_id}/blocks/{block_id}/review", parser_block_review, methods=["POST"]),
         Route("/v1/parser/runs/{parser_run_id}/flush", parser_flush, methods=["POST"]),
+        Route("/v1/parser/runs/{parser_run_id}/rebuild-index", parser_rebuild_index, methods=["POST"]),
         Route("/v1/parser/runs/{parser_run_id}/download", parser_download),
         Route("/v1/retrievals/{retrieval_id}", get_retrieval),
         Route("/v1/verify", verify),

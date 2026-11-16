@@ -33,6 +33,7 @@ dependencies = [
 dev = [
     "pytest>=9.1",
     "pytest-asyncio>=1.4",
+    "pytest-benchmark>=5.1",
     "ruff>=0.6",
     "mypy>=1.11",
 ]
@@ -44,6 +45,9 @@ turso = [
 ]
 pgvector = [
     "psycopg[binary]>=3.2",
+]
+local-embeddings = [
+    "sentence-transformers>=3.0",
 ]
 
 [project.entry-points]
@@ -66,6 +70,7 @@ filterwarnings = [
 ]
 markers = [
     "benchmark: performance benchmark (needs pytest-benchmark; excluded from CI, run manually with -m benchmark)",
+    "integration: opt-in local service integration (excluded unless explicitly enabled)",
     "live: requires public network access or local socket binding",
 ]
 
