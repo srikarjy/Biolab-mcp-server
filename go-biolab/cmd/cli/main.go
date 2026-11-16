@@ -611,7 +611,7 @@ func runVerify(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	ok, brokenID, err := retrieval.VerifyChain(database)
 	if err != nil {
 		return err
@@ -636,7 +636,7 @@ func runAnchor(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	ok, brokenID, err := retrieval.VerifyChain(database)
 	if err != nil {
 		return err
@@ -673,7 +673,7 @@ func runVerifyAnchor(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	chainOK, brokenID, err := retrieval.VerifyChain(database)
 	if err != nil {
 		return err
