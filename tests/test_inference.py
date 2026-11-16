@@ -65,7 +65,10 @@ def test_deepseek_path_validates_citations(monkeypatch, tmp_path):
         "model_provider": "deepseek", "model_name": "deepseek-chat", "insights": [{
             "text": "KRAS is associated with pancreatic cancer.",
             "citations": [{"retrieval_id": record.retrieval_id, "field_name": "abstract", "excerpt": "KRAS is associated with pancreatic cancer."}],
-        }, {"text": "Unsupported claim", "citations": [{"retrieval_id": "fake", "field_name": "abstract", "excerpt": "nope"}]}],
+        }, {"text": "Unsupported claim", "citations": [{"retrieval_id": "fake", "field_name": "abstract", "excerpt": "nope"}]}, {
+            "text": "Completely unrelated result",
+            "citations": [{"retrieval_id": record.retrieval_id, "field_name": "abstract", "excerpt": "KRAS is associated with pancreatic cancer."}],
+        }],
     })
     result = inference.create_inference(conn, "KRAS cancer", [record.retrieval_id], created_by="scientist")
     assert result["model_provider"] == "deepseek"

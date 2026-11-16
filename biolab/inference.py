@@ -37,6 +37,19 @@ def _citation_id(*parts: str) -> str:
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
+def _claim_supported(claim_text: str, citations: list[dict[str, Any]]) -> bool:
+    """Require meaningful lexical support before persisting a model-generated claim.
+
+    This is deliberately a conservative guardrail, not scientific entailment: the
+    claim must share at least one non-trivial token with the cited source text.
+    Exact spans and retrieval IDs are still validated separately below.
+    """
+    stopwords = {"a", "an", "and", "are", "as", "by", "for", "from", "in", "is", "of", "on", "or", "the", "to", "with"}
+    claim_tokens = _tokens(claim_text) - stopwords
+    evidence_tokens = set().union(*(_tokens(str(item["excerpt"])) for item in citations))
+    return bool(claim_tokens and claim_tokens & evidence_tokens)
+
+
 def _deepseek_inference(
     conn: Any, question: str, rows: list[tuple[Any, ...]], *, created_by: str,
     project_id: str | None, ranking_run_id: str | None, max_insights: int,
@@ -83,7 +96,7 @@ def _deepseek_inference(
             if not excerpt:
                 continue
             valid.append({"item": item, "field_name": field_name, "start": start, "end": end, "excerpt": excerpt})
-        if not valid:
+        if not valid or not _claim_supported(generated_claim["text"], valid):
             continue
         claim_id = str(uuid.uuid4())
         conn.execute("INSERT INTO inference_claims (claim_id, inference_run_id, claim_text, created_at) VALUES (?, ?, ?, ?)", (claim_id, run_id, generated_claim["text"].strip(), created_at))
