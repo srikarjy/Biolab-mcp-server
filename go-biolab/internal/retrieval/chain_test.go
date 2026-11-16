@@ -164,7 +164,7 @@ func TestLegacyDatabaseUpgrades(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer database.Close()
+	defer func() { _ = database.Close() }()
 	var version int
 	if err := database.Get(&version, "SELECT hash_version FROM retrievals WHERE retrieval_id='old'"); err != nil || version != 1 {
 		t.Fatalf("legacy row should be hash_version 1, got %d (%v)", version, err)
