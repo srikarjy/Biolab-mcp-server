@@ -18,7 +18,7 @@ def _fake_search(_conn, query, agent_id, sources, max_results):
 
 def test_agent_card_and_a2a_search(monkeypatch, tmp_path):
     monkeypatch.setattr(evidence, "search_evidence", _fake_search)
-    with TestClient(create_app(tmp_path / "a2a.db")) as client:
+    with TestClient(create_app(tmp_path / "a2a.db", require_auth=False)) as client:
         card = client.get("/.well-known/agent-card.json")
         response = client.post(
             "/a2a",
@@ -59,7 +59,7 @@ def test_agent_card_and_a2a_search(monkeypatch, tmp_path):
 
 
 def test_a2a_invalid_task_and_method(tmp_path):
-    with TestClient(create_app(tmp_path / "a2a-errors.db")) as client:
+    with TestClient(create_app(tmp_path / "a2a-errors.db", require_auth=False)) as client:
         missing = client.post(
             "/a2a",
             json={
@@ -78,7 +78,7 @@ def test_a2a_invalid_task_and_method(tmp_path):
 def test_a2a_rank_operation_uses_shared_ranking_service(tmp_path):
     from biolab import retrieval_log
 
-    app = create_app(tmp_path / "a2a-rank.db")
+    app = create_app(tmp_path / "a2a-rank.db", require_auth=False)
     with TestClient(app) as client:
         record = retrieval_log.write_retrieval(
             app.state.conn, "KRAS", "1", "test", "pubmed", {}, "raw",

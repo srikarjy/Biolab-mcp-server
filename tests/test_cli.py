@@ -69,7 +69,7 @@ def test_keys_create_rejects_blank_label_and_revoke_unknown_fails(tmp_path):
 def test_web_refuses_open_public_bind_unless_explicit(tmp_path, monkeypatch):
     monkeypatch.delenv("BIOLAB_ALLOW_ANONYMOUS", raising=False)
     monkeypatch.delenv("BIOLAB_REQUIRE_AUTH", raising=False)
-    result = runner.invoke(app, ["web", "--host", "0.0.0.0", "--db", str(tmp_path / "t.db")])
+    result = runner.invoke(app, ["web", "--allow-anonymous", "--host", "0.0.0.0", "--db", str(tmp_path / "t.db")])
     assert result.exit_code == 1 and "Refusing to listen" in result.output
 
 

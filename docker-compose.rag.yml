@@ -4,7 +4,7 @@ services:
     environment:
       POSTGRES_DB: biolab
       POSTGRES_USER: biolab
-      POSTGRES_PASSWORD: biolab
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD for local pgvector}
     ports:
       - "127.0.0.1:54329:5432"
     healthcheck:

@@ -79,6 +79,16 @@ def _bound(agent_id: str, ctx: Context) -> str:
     return auth.bind_agent_id(agent_id, request)
 
 
+def _assert_mcp_owner(owner_id: str, ctx: Context) -> None:
+    """Require ownership for authenticated MCP callers; explicit public mode stays public."""
+    try:
+        request = ctx.request_context.request
+    except (ValueError, AttributeError):
+        request = None
+    if auth.is_authenticated(request) and owner_id != auth.request_identity(request):
+        raise ValueError("resource not found")
+
+
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)
 def search_evidence(
     query: str,
@@ -115,6 +125,8 @@ def rank_evidence(
     as_of: str | None = None,
 ) -> dict:
     """Rank preserved retrievals with deterministic score components and reasons."""
+    if project_id and not workspace.has_project_access(_conn, project_id, _bound("mcp:user", ctx)):
+        raise ValueError("project not found")
     return ranking.rank_retrievals(
         _conn,
         question,
@@ -127,11 +139,16 @@ def rank_evidence(
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def get_ranking(ranking_run_id: str) -> dict:
+def get_ranking(ranking_run_id: str, ctx: Context) -> dict:
     """Fetch a ranking run and its stored explanations and review states."""
     result = ranking.get_ranking(_conn, ranking_run_id)
     if result is None:
         raise ValueError("ranking run not found")
+    if result.get("project_id"):
+        if not workspace.has_project_access(_conn, result["project_id"], _bound("mcp:user", ctx)):
+            raise ValueError("ranking run not found")
+    else:
+        _assert_mcp_owner(str(result.get("created_by", "")), ctx)
     return result
 
 
@@ -142,8 +159,19 @@ def review_ranked_candidate(
     review_state: str,
     reviewed_by: str,
     review_note: str = "",
+    ctx: Context | None = None,
 ) -> dict:
     """Record accepted, rejected, or conflicting scientist review for a candidate."""
+    if ctx is None:
+        raise ValueError("authenticated context is required")
+    existing = ranking.get_ranking(_conn, ranking_run_id)
+    if existing is None:
+        raise ValueError("ranking run not found")
+    if existing.get("project_id"):
+        if not workspace.has_project_access(_conn, existing["project_id"], _bound("mcp:user", ctx)):
+            raise ValueError("ranking run not found")
+    else:
+        _assert_mcp_owner(str(existing.get("created_by", "")), ctx)
     return ranking.review_candidate(
         _conn, ranking_run_id, ranking_candidate_id,
         review_state=review_state, reviewed_by=reviewed_by, review_note=review_note,
@@ -161,6 +189,8 @@ def create_grounded_insights(
     max_insights: int = 10,
 ) -> dict:
     """Extract insights only from preserved evidence and return citation spans."""
+    if project_id and not workspace.has_project_access(_conn, project_id, _bound("mcp:user", ctx)):
+        raise ValueError("project not found")
     return inference.create_inference(
         _conn, question, retrieval_ids,
         created_by=_bound(created_by, ctx), project_id=project_id,
@@ -169,40 +199,49 @@ def create_grounded_insights(
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def get_grounded_insights(inference_run_id: str) -> dict:
+def get_grounded_insights(inference_run_id: str, ctx: Context) -> dict:
     """Fetch grounded claims and their validated retrieval citations."""
     result = inference.get_inference(_conn, inference_run_id)
     if result is None:
         raise ValueError("inference run not found")
+    if result.get("project_id"):
+        if not workspace.has_project_access(_conn, result["project_id"], _bound("mcp:user", ctx)):
+            raise ValueError("inference run not found")
+    else:
+        _assert_mcp_owner(str(result.get("created_by", "")), ctx)
     return result
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
-def flush_grounded_parser_data(inference_run_id: str) -> dict:
+def flush_grounded_parser_data(inference_run_id: str, ctx: Context) -> dict:
     """Delete temporary parser chunks while preserving claims and citations."""
+    result = get_grounded_insights(inference_run_id, ctx)
+    del result
     return inference.flush_parser_chunks(_conn, inference_run_id)
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
 def parse_document_with_huggingface(filename: str, content_base64: str, ctx: Context) -> dict:
     """Parse a PDF through the configured Hugging Face document parser."""
+    max_encoded = ((document_parser.hf_parser.MAX_DOCUMENT_BYTES + 2) // 3) * 4
+    if len(content_base64) > max_encoded:
+        raise ValueError("encoded document exceeds maximum size")
     return document_parser.create_parser_run(
         _conn, base64.b64decode(content_base64, validate=True), filename, _bound("mcp:parser", ctx)
     )
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def get_parsed_document(parser_run_id: str) -> dict:
+def get_parsed_document(parser_run_id: str, ctx: Context) -> dict:
     """Inspect page-aware Hugging Face parser blocks."""
-    result = document_parser.get_parser_run(_conn, parser_run_id)
-    if result is None:
-        raise ValueError("parser run not found")
-    return result
+    return document_parser.assert_run_access(_conn, parser_run_id, _bound("mcp:parser", ctx))
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
-def flush_parsed_document(parser_run_id: str) -> dict:
+def flush_parsed_document(parser_run_id: str, ctx: Context) -> dict:
     """Delete temporary parsed blocks while retaining audit claims."""
+    owner = _bound("mcp:parser", ctx)
+    document_parser.assert_run_access(_conn, parser_run_id, owner)
     return document_parser.flush_parser_run(_conn, parser_run_id)
 
 
@@ -225,11 +264,12 @@ def plugin_search(query: str, ctx: Context) -> dict:
 
 
 @mcp.tool(name="fetch", annotations=READ_ANNOTATIONS)
-def plugin_fetch(id: str) -> dict:  # noqa: A002 - MCP knowledge-tool schema calls this field id
+def plugin_fetch(id: str, ctx: Context) -> dict:  # noqa: A002 - MCP knowledge-tool schema calls this field id
     """Fetch one preserved evidence record by retrieval ID."""
     record = retrieval_log.get_retrieval(_conn, id)
     if record is None:
         raise ValueError("retrieval not found")
+    _assert_mcp_owner(record.agent_id, ctx)
     snapshot = json.loads(record.snapshot)
     return {
         "id": record.retrieval_id,
@@ -324,21 +364,21 @@ def list_evidence_watches(ctx: Context, project_id: str | None = None) -> dict:
 
 
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)
-def run_evidence_watch(watch_id: str) -> dict:
+def run_evidence_watch(watch_id: str, ctx: Context) -> dict:
     """Run one evidence watch and record added, removed, or revised evidence."""
-    return workspace.run_watch(_conn, watch_id)
+    return workspace.run_watch(_conn, watch_id, _bound("mcp:user", ctx))
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def list_evidence_events(watch_id: str) -> dict:
+def list_evidence_events(watch_id: str, ctx: Context) -> dict:
     """List change events previously detected by an evidence watch."""
-    return {"events": workspace.list_watch_events(_conn, watch_id)}
+    return {"events": workspace.list_watch_events(_conn, watch_id, _bound("mcp:user", ctx))}
 
 
 @mcp.tool(annotations=SEARCH_ANNOTATIONS)
-def run_all_evidence_watches() -> dict:
+def run_all_evidence_watches(ctx: Context) -> dict:
     """Run all active watches and return explicit per-watch failures."""
-    return workspace.run_active_watches(_conn)
+    return workspace.run_active_watches(_conn, _bound("mcp:user", ctx))
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
@@ -354,17 +394,20 @@ def link_claim_evidence(
     stance: str,
     assessment: str = "agent_proposed",
     note: str = "",
+    ctx: Context | None = None,
 ) -> dict:
     """Propose or record how one retrieval relates to a claim."""
+    if ctx is None:
+        raise ValueError("authenticated context is required")
     return workspace.link_claim_evidence(
-        _conn, claim_id, retrieval_id, stance, assessment, note
+        _conn, claim_id, retrieval_id, stance, assessment, note, _bound("mcp:user", ctx)
     )
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def trace_claim(claim_id: str) -> dict:
+def trace_claim(claim_id: str, ctx: Context) -> dict:
     """Trace a claim to supporting, conflicting, contextual, or insufficient evidence."""
-    result = workspace.trace_claim(_conn, claim_id)
+    result = workspace.trace_claim(_conn, claim_id, _bound("mcp:user", ctx))
     if result is None:
         raise ValueError("claim not found")
     return result
@@ -631,23 +674,42 @@ def run_tool(
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def get_execution(execution_id: str) -> dict:
+def get_execution(execution_id: str, ctx: Context) -> dict:
     """Fetch one execution record, including output artifact hashes."""
     record = executions.get_execution(_conn, execution_id)
     if record is None:
         raise ValueError("execution not found")
+    _assert_mcp_owner(str(record.get("agent_id", "")), ctx)
     return record
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def list_executions(tool: str | None = None, limit: int = 50) -> dict:
+def list_executions(tool: str | None = None, limit: int = 50, ctx: Context | None = None) -> dict:
     """List recent execution records, newest first."""
-    return {"executions": executions.list_executions(_conn, tool, limit)}
+    if ctx is None:
+        raise ValueError("authenticated context is required")
+    owner = _bound("mcp:user", ctx)
+    records = executions.list_executions(_conn, tool, limit)
+    if auth.is_authenticated(getattr(ctx.request_context, "request", None)):
+        records = [record for record in records if record.get("agent_id") == owner]
+    return {"executions": records}
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def get_artifact(sha256: str) -> dict:
+def get_artifact(sha256: str, ctx: Context) -> dict:
     """Fetch an output artifact by its sha256 (text only; capped in size)."""
+    try:
+        request = ctx.request_context.request
+    except (ValueError, AttributeError):
+        request = None
+    if auth.is_authenticated(request):
+        owner = auth.request_identity(request)
+        owned = any(
+            record.get("agent_id") == owner and sha256 in json.dumps(record.get("outputs", {}), sort_keys=True)
+            for record in executions.list_executions(_conn, limit=500)
+        )
+        if not owned:
+            raise ValueError("artifact not found")
     data = _artifacts.get(sha256)
     if len(data) > MAX_ARTIFACT_RETURN_BYTES:
         raise ValueError(f"artifact is {len(data)} bytes; limit is {MAX_ARTIFACT_RETURN_BYTES}")
@@ -662,13 +724,14 @@ def verify_executions() -> dict:
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def replay_execution(execution_id: str) -> dict:
+def replay_execution(execution_id: str, ctx: Context) -> dict:
     """Re-run a recorded execution and report whether its outputs reproduced. Writes nothing."""
+    get_execution(execution_id, ctx)
     return executions.replay(_conn, _artifacts, _registry, execution_id)
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
-def get_retrieval(retrieval_id: str) -> dict:
+def get_retrieval(retrieval_id: str, ctx: Context) -> dict:
     """Retrieve a full retrieval record by its retrieval_id.
 
     Args:
@@ -680,6 +743,7 @@ def get_retrieval(retrieval_id: str) -> dict:
     record = retrieval_log.get_retrieval(_conn, retrieval_id)
     if record is None:
         raise ValueError(f"no retrieval found for id: {retrieval_id!r}")
+    _assert_mcp_owner(record.agent_id, ctx)
 
     return {
         "retrieval_id": record.retrieval_id,

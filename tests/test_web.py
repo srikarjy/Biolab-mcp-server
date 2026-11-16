@@ -8,7 +8,7 @@ from starlette.testclient import TestClient
 
 
 def test_dashboard_and_health(tmp_path):
-    with TestClient(create_app(tmp_path / "web.db")) as client:
+    with TestClient(create_app(tmp_path / "web.db", require_auth=False)) as client:
         page = client.get("/")
         health = client.get("/health")
         schema = client.get("/openapi.json")
@@ -28,7 +28,7 @@ def test_huggingface_parser_api_persists_and_flushes(monkeypatch, tmp_path):
         "parser_model": "nvidia/Nemotron-3.5-Parse", "status": "succeeded", "source_hash": "abc", "block_count": 1,
         "blocks": [{"block_id": "b1", "page_number": 1, "block_index": 0, "block_type": "paragraph", "text": "Parsed", "bbox": None}],
     })
-    with TestClient(create_app(tmp_path / "parser-web.db")) as client:
+    with TestClient(create_app(tmp_path / "parser-web.db", require_auth=False)) as client:
         created = client.post("/v1/parser/parse", json={"filename": "paper.pdf", "content_base64": base64.b64encode(b"pdf").decode()})
         run_id = created.json()["parser_run_id"]
         block_id = created.json()["blocks"][0]["block_id"]
@@ -50,7 +50,7 @@ def test_parsed_documents_live_inside_project_folder_and_download(monkeypatch, t
         "parser_model": "nvidia/Nemotron-3.5-Parse", "status": "succeeded", "source_hash": "abc", "block_count": 1,
         "blocks": [{"block_id": "b1", "page_number": 1, "block_index": 0, "block_type": "paragraph", "text": "Stored evidence", "bbox": None}],
     })
-    with TestClient(create_app(tmp_path / "folder.db")) as client:
+    with TestClient(create_app(tmp_path / "folder.db", require_auth=False)) as client:
         project = client.post("/v1/projects", json={"name": "Diabetes review"}).json()
         parsed = client.post("/v1/parser/parse", json={
             "project_id": project["project_id"], "filename": "paper.pdf",
@@ -72,7 +72,7 @@ def test_parsed_documents_live_inside_project_folder_and_download(monkeypatch, t
 
 
 def test_selected_mcp_paper_flows_into_project_parser_and_notes(tmp_path):
-    app = create_app(tmp_path / "selected-paper.db")
+    app = create_app(tmp_path / "selected-paper.db", require_auth=False)
     with TestClient(app) as client:
         project = client.post("/v1/projects", json={"name": "Paper RAG"}).json()
         record = retrieval_log.write_retrieval(
@@ -103,7 +103,7 @@ def test_search_api_uses_shared_service(monkeypatch, tmp_path):
         return {"query_echo": query, "sources": {}, "errors": {}, "retrieval_count": 0}
 
     monkeypatch.setattr(evidence, "search_evidence", fake_search)
-    with TestClient(create_app(tmp_path / "web.db")) as client:
+    with TestClient(create_app(tmp_path / "web.db", require_auth=False)) as client:
         response = client.post(
             "/v1/evidence/search",
             json={"query": "KRAS", "sources": ["pubmed"], "max_results": 2},
@@ -120,7 +120,7 @@ def test_search_api_uses_shared_service(monkeypatch, tmp_path):
 
 
 def test_retrieval_and_verification_endpoints(tmp_path):
-    app = create_app(tmp_path / "web.db")
+    app = create_app(tmp_path / "web.db", require_auth=False)
     with TestClient(app) as client:
         record = retrieval_log.write_retrieval(
             app.state.conn, "q", "1", "test", "pubmed", {}, "raw", {"title": "Test"}
@@ -139,7 +139,7 @@ def test_retrieval_and_verification_endpoints(tmp_path):
 
 
 def test_ranking_api_returns_explanations_and_persists_run(tmp_path):
-    app = create_app(tmp_path / "ranking.db")
+    app = create_app(tmp_path / "ranking.db", require_auth=False)
     with TestClient(app) as client:
         records = [
             retrieval_log.write_retrieval(
@@ -165,7 +165,7 @@ def test_ranking_api_returns_explanations_and_persists_run(tmp_path):
 
 
 def test_ranking_review_api_updates_candidate(tmp_path):
-    app = create_app(tmp_path / "ranking-review.db")
+    app = create_app(tmp_path / "ranking-review.db", require_auth=False)
     with TestClient(app) as client:
         record = retrieval_log.write_retrieval(
             app.state.conn, "KRAS", "1", "test", "pubmed", {}, "raw",
@@ -184,7 +184,7 @@ def test_ranking_review_api_updates_candidate(tmp_path):
 
 
 def test_save_reviewed_candidates_requires_review_and_persists_collection_item(tmp_path):
-    app = create_app(tmp_path / "save-reviewed.db")
+    app = create_app(tmp_path / "save-reviewed.db", require_auth=False)
     with TestClient(app) as client:
         project = client.post("/v1/projects", json={"name": "Reviewed"}).json()
         record = retrieval_log.write_retrieval(
@@ -202,7 +202,7 @@ def test_save_reviewed_candidates_requires_review_and_persists_collection_item(t
 
 
 def test_inference_api_returns_citations_and_flushes_parser_data(tmp_path):
-    app = create_app(tmp_path / "inference.db")
+    app = create_app(tmp_path / "inference.db", require_auth=False)
     with TestClient(app) as client:
         record = retrieval_log.write_retrieval(
             app.state.conn, "KRAS cancer", "1", "test", "pubmed", {}, "raw",
@@ -224,7 +224,7 @@ def test_inference_api_returns_citations_and_flushes_parser_data(tmp_path):
 
 
 def test_bad_request_and_missing_retrieval(tmp_path):
-    with TestClient(create_app(tmp_path / "web.db")) as client:
+    with TestClient(create_app(tmp_path / "web.db", require_auth=False)) as client:
         bad = client.post("/v1/evidence/search", json={"query": "", "max_results": 0})
         missing = client.get("/v1/retrievals/not-found")
 
@@ -233,7 +233,7 @@ def test_bad_request_and_missing_retrieval(tmp_path):
 
 
 def test_project_and_collection_api(tmp_path):
-    app = create_app(tmp_path / "web.db")
+    app = create_app(tmp_path / "web.db", require_auth=False)
     with TestClient(app) as client:
         project = client.post("/v1/projects", json={"name": "KRAS project"})
         collection = client.post(
@@ -258,7 +258,7 @@ def test_project_and_collection_api(tmp_path):
 
 
 def test_watch_api(monkeypatch, tmp_path):
-    app = create_app(tmp_path / "web.db")
+    app = create_app(tmp_path / "web.db", require_auth=False)
     monkeypatch.setattr(
         "biolab.workspace.evidence.search_source",
         lambda *_args: [
@@ -285,7 +285,7 @@ def test_watch_api(monkeypatch, tmp_path):
 
 
 def test_run_all_watches_api(monkeypatch, tmp_path):
-    app = create_app(tmp_path / "web.db")
+    app = create_app(tmp_path / "web.db", require_auth=False)
     monkeypatch.setattr(
         "biolab.workspace.run_active_watches",
         lambda _conn: {"completed": [{"watch_id": "w1"}], "errors": []},
@@ -331,7 +331,7 @@ def test_required_api_key_and_identity_binding(monkeypatch, tmp_path):
 
 
 def test_claim_trace_api(tmp_path):
-    app = create_app(tmp_path / "claims.db")
+    app = create_app(tmp_path / "claims.db", require_auth=False)
     with TestClient(app) as client:
         project = client.post("/v1/projects", json={"name": "Claims"}).json()
         claim = client.post(
@@ -356,7 +356,7 @@ def test_claim_trace_api(tmp_path):
 
 
 def test_project_report_api_supports_json_and_markdown(tmp_path):
-    app = create_app(tmp_path / "report.db")
+    app = create_app(tmp_path / "report.db", require_auth=False)
     with TestClient(app) as client:
         project = client.post("/v1/projects", json={"name": "Report"}).json()
         json_report = client.get(f"/v1/projects/{project['project_id']}/report")
@@ -376,7 +376,7 @@ def test_project_report_api_supports_json_and_markdown(tmp_path):
 
 
 def test_project_click_opens_dedicated_workspace_page(tmp_path):
-    app = create_app(tmp_path / "workspace-page.db")
+    app = create_app(tmp_path / "workspace-page.db", require_auth=False)
     with TestClient(app) as client:
         project = client.post("/v1/projects", json={"name": "Workspace page"}).json()
         page = client.get(f"/projects/{project['project_id']}")

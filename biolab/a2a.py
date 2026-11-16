@@ -17,7 +17,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from biolab import auth, inference, ranking, workspace
+from biolab import auth, inference, ranking, retrieval_log, workspace
 from biolab import evidence as evidence_service
 
 A2A_PROTOCOL_VERSION = "1.0"
@@ -118,7 +118,7 @@ def _search_options(params: dict[str, Any], message: dict[str, Any]) -> tuple[li
     return sources, max_results
 
 
-def _task(message: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+def _task(message: dict[str, Any], result: dict[str, Any], owner_id: str) -> dict[str, Any]:
     task_id = str(uuid.uuid4())
     context_id = message.get("contextId") or str(uuid.uuid4())
     status_message = {
@@ -147,7 +147,8 @@ def _task(message: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
             "scientificBoundary": (
                 "Provenance and retrieval are recorded; scientific or clinical "
                 "validation still requires human review."
-            )
+            ),
+            "owner_id": owner_id,
         },
     }
 
@@ -165,25 +166,45 @@ def _derived_operation(request: Request, metadata: dict[str, Any]) -> dict[str, 
         ids = metadata.get("retrieval_ids", [])
         if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
             raise ValueError("metadata.retrieval_ids must be a list of strings")
+        identity = auth.request_identity(request)
+        if auth.is_authenticated(request) and any(
+            (record := retrieval_log.get_retrieval(request.app.state.conn, item)) is None
+            or record.agent_id != identity
+            for item in ids
+        ):
+            raise ValueError("retrieval access denied")
+        project_id = str(metadata["project_id"]) if metadata.get("project_id") else None
+        if project_id and not workspace.has_project_access(request.app.state.conn, project_id, auth.request_identity(request)):
+            raise ValueError("project not found")
         return ranking.rank_retrievals(
             request.app.state.conn, str(metadata.get("question", "")), ids,
             created_by=f"a2a:{auth.current_identity.get()}",
-            project_id=str(metadata["project_id"]) if metadata.get("project_id") else None,
+            project_id=project_id,
             requested_limit=int(metadata.get("requested_limit", 5)),
         )
     if operation == "grounded_insights":
         ids = metadata.get("retrieval_ids", [])
         if not isinstance(ids, list) or not all(isinstance(item, str) for item in ids):
             raise ValueError("metadata.retrieval_ids must be a list of strings")
+        identity = auth.request_identity(request)
+        if auth.is_authenticated(request) and any(
+            (record := retrieval_log.get_retrieval(request.app.state.conn, item)) is None
+            or record.agent_id != identity
+            for item in ids
+        ):
+            raise ValueError("retrieval access denied")
+        project_id = str(metadata["project_id"]) if metadata.get("project_id") else None
+        if project_id and not workspace.has_project_access(request.app.state.conn, project_id, auth.request_identity(request)):
+            raise ValueError("project not found")
         return inference.create_inference(
             request.app.state.conn, str(metadata.get("question", "")), ids,
             created_by=f"a2a:{auth.current_identity.get()}",
-            project_id=str(metadata["project_id"]) if metadata.get("project_id") else None,
+            project_id=project_id,
             ranking_run_id=str(metadata["ranking_run_id"]) if metadata.get("ranking_run_id") else None,
             max_insights=int(metadata.get("max_insights", 10)),
         )
     if operation == "project_report":
-        report = workspace.get_project_report(request.app.state.conn, str(metadata.get("project_id", "")))
+        report = workspace.get_project_report(request.app.state.conn, str(metadata.get("project_id", "")), auth.request_identity(request))
         if report is None:
             raise ValueError("project not found")
         return report
@@ -205,7 +226,7 @@ async def agent_card_endpoint(request: Request) -> JSONResponse:
     return JSONResponse(agent_card(base_url))
 
 
-async def rpc_endpoint(request: Request) -> JSONResponse:  # noqa: PLR0911 - JSON-RPC dispatch
+async def rpc_endpoint(request: Request) -> JSONResponse:  # noqa: PLR0911, PLR0912 - JSON-RPC dispatch
     try:
         payload = await request.json()
     except (ValueError, TypeError):
@@ -226,6 +247,8 @@ async def rpc_endpoint(request: Request) -> JSONResponse:  # noqa: PLR0911 - JSO
             return _rpc_error(request_id, -32602, "Task id is required")
         task = _store(request).get(task_id)
         if task is None:
+            return _rpc_error(request_id, -32001, "Task not found", {"taskId": task_id})
+        if task.get("metadata", {}).get("owner_id") != auth.request_identity(request):
             return _rpc_error(request_id, -32001, "Task not found", {"taskId": task_id})
         return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": task})
 
@@ -254,7 +277,7 @@ async def rpc_endpoint(request: Request) -> JSONResponse:  # noqa: PLR0911 - JSO
     except Exception as exc:  # noqa: BLE001 - convert connector failures to task errors
         return _rpc_error(request_id, -32000, "Evidence search failed", {"error": str(exc)})
 
-    task = _task(message, result)
+    task = _task(message, result, auth.request_identity(request))
     _store(request).put(task)
     return JSONResponse({"jsonrpc": "2.0", "id": request_id, "result": {"task": task}})
 

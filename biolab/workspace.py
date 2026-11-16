@@ -175,13 +175,17 @@ def add_collection_item(
     retrieval_id: str,
     note: str = "",
     relevance: str = "unreviewed",
+    owner_id: str | None = None,
 ) -> dict:
     if relevance not in RELEVANCE_VALUES:
         raise ValueError(f"invalid relevance; choose from: {', '.join(sorted(RELEVANCE_VALUES))}")
-    if conn.execute(
-        "SELECT 1 FROM evidence_collections WHERE collection_id = ?", (collection_id,)
-    ).fetchone() is None:
+    collection_row = conn.execute(
+        "SELECT project_id FROM evidence_collections WHERE collection_id = ?", (collection_id,)
+    ).fetchone()
+    if collection_row is None:
         raise ValueError("collection not found")
+    if owner_id is not None and not has_project_access(conn, collection_row[0], owner_id):
+        raise ValueError("project access denied")
     if conn.execute(
         "SELECT 1 FROM retrievals WHERE retrieval_id = ?", (retrieval_id,)
     ).fetchone() is None:
@@ -205,13 +209,15 @@ def add_collection_item(
     }
 
 
-def get_collection(conn: Any, collection_id: str) -> dict | None:
+def get_collection(conn: Any, collection_id: str, owner_id: str | None = None) -> dict | None:
     row = conn.execute(
         """SELECT collection_id, project_id, name, description, created_at
            FROM evidence_collections WHERE collection_id = ?""",
         (collection_id,),
     ).fetchone()
     if row is None:
+        return None
+    if owner_id is not None and not has_project_access(conn, row[1], owner_id):
         return None
     items = conn.execute(
         """SELECT i.retrieval_id, i.note, i.relevance, i.added_at,
@@ -250,10 +256,10 @@ def save_retrieval_to_project(conn: Any, project_id: str, retrieval_id: str, own
         "SELECT collection_id FROM evidence_collections WHERE project_id = ? AND name = ?",
         (project_id, "Selected papers"),
     ).fetchone()
-    collection = get_collection(conn, row[0]) if row else create_collection(conn, project_id, "Selected papers", "MCP-retrieved papers selected for parsing", owner_id)
+    collection = get_collection(conn, row[0], owner_id) if row else create_collection(conn, project_id, "Selected papers", "MCP-retrieved papers selected for parsing", owner_id)
     if collection is None:
         raise ValueError("selected papers collection not found")
-    return add_collection_item(conn, collection["collection_id"], retrieval_id, "Selected for project parsing", "unreviewed")
+    return add_collection_item(conn, collection["collection_id"], retrieval_id, "Selected for project parsing", "unreviewed", owner_id)
 
 
 def list_project_retrievals(conn: Any, project_id: str, owner_id: str) -> list[dict]:
@@ -362,19 +368,21 @@ def list_watches(conn: Any, project_id: str | None = None, owner_id: str | None 
     ]
 
 
-def run_watch(conn: Any, watch_id: str) -> dict:
+def run_watch(conn: Any, watch_id: str, owner_id: str | None = None) -> dict:
     row = conn.execute(
-        """SELECT source, query_text, agent_id, max_results, active, previous_ids
+        """SELECT project_id, source, query_text, agent_id, max_results, active, previous_ids
            FROM evidence_watches WHERE watch_id = ?""",
         (watch_id,),
     ).fetchone()
     if row is None:
         raise ValueError("watch not found")
-    if not row[4]:
+    if owner_id is not None and not has_project_access(conn, row[0], owner_id):
+        raise ValueError("watch not found")
+    if not row[5]:
         raise ValueError("watch is inactive")
 
-    records = evidence.search_source(conn, row[0], row[1], row[2], row[3])
-    stored_state = json.loads(row[5])
+    records = evidence.search_source(conn, row[1], row[2], row[3], row[4])
+    stored_state = json.loads(row[6])
     # Older databases stored only a list of identifiers. Treat those records as
     # hash-unknown so the first upgraded run does not report false changes.
     previous_hashes = (
@@ -424,20 +432,25 @@ def run_watch(conn: Any, watch_id: str) -> dict:
     return {"watch_id": watch_id, "checked_at": detected_at, "records": records, "events": events}
 
 
-def run_active_watches(conn: Any) -> dict:
+def run_active_watches(conn: Any, owner_id: str | None = None) -> dict:
     results = []
     errors = []
-    for watch in list_watches(conn):
+    for watch in list_watches(conn, owner_id=owner_id):
         if not watch["active"]:
             continue
         try:
-            results.append(run_watch(conn, watch["watch_id"]))
+            results.append(run_watch(conn, watch["watch_id"], owner_id) if owner_id is not None else run_watch(conn, watch["watch_id"]))
         except Exception as exc:
             errors.append({"watch_id": watch["watch_id"], "error": str(exc)})
     return {"completed": results, "errors": errors}
 
 
-def list_watch_events(conn: Any, watch_id: str) -> list[dict]:
+def list_watch_events(conn: Any, watch_id: str, owner_id: str | None = None) -> list[dict]:
+    project_row = conn.execute(
+        "SELECT project_id FROM evidence_watches WHERE watch_id = ?", (watch_id,)
+    ).fetchone()
+    if project_row is None or (owner_id is not None and not has_project_access(conn, project_row[0], owner_id)):
+        raise ValueError("watch not found")
     rows = conn.execute(
         """SELECT event_id, event_type, external_id, retrieval_id, detected_at
            FROM evidence_events WHERE watch_id = ? ORDER BY detected_at DESC""",
@@ -480,6 +493,7 @@ def link_claim_evidence(
     stance: str,
     assessment: str = "unreviewed",
     note: str = "",
+    owner_id: str | None = None,
 ) -> dict:
     if stance not in STANCE_VALUES:
         raise ValueError(f"invalid stance; choose from: {', '.join(sorted(STANCE_VALUES))}")
@@ -487,7 +501,10 @@ def link_claim_evidence(
         raise ValueError(
             f"invalid assessment; choose from: {', '.join(sorted(ASSESSMENT_VALUES))}"
         )
-    if conn.execute("SELECT 1 FROM claims WHERE claim_id = ?", (claim_id,)).fetchone() is None:
+    claim_row = conn.execute("SELECT project_id FROM claims WHERE claim_id = ?", (claim_id,)).fetchone()
+    if claim_row is None:
+        raise ValueError("claim not found")
+    if owner_id is not None and not has_project_access(conn, claim_row[0], owner_id):
         raise ValueError("claim not found")
     if conn.execute(
         "SELECT 1 FROM retrievals WHERE retrieval_id = ?", (retrieval_id,)
@@ -513,12 +530,14 @@ def link_claim_evidence(
     }
 
 
-def trace_claim(conn: Any, claim_id: str) -> dict | None:
+def trace_claim(conn: Any, claim_id: str, owner_id: str | None = None) -> dict | None:
     row = conn.execute(
         "SELECT claim_id, project_id, claim_text, created_at FROM claims WHERE claim_id = ?",
         (claim_id,),
     ).fetchone()
     if row is None:
+        return None
+    if owner_id is not None and not has_project_access(conn, row[1], owner_id):
         return None
     evidence_rows = conn.execute(
         """SELECT ce.retrieval_id, ce.stance, ce.assessment, ce.note, ce.added_at,
