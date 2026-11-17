@@ -296,8 +296,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           <div id="project-detail" class="project-detail" hidden></div>
         </section>
         <details class="panel side-panel">
-          <summary><strong>Remote API key</strong> <span class="muted">(optional)</span></summary>
-          <p class="kicker">Stored only in this browser tab and sent as a Bearer header.</p>
+          <summary><strong>Remote API key</strong> <span class="muted">(optional for public demos)</span></summary>
+          <p class="kicker">Private deployments require a key. It is stored only in this browser tab and sent as a Bearer header.</p>
           <label class="sr-only" for="api-key">API key</label>
           <input id="api-key" type="password" placeholder="blb_…" autocomplete="off">
         </details>
@@ -454,12 +454,19 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         const response = await apiFetch('/v1/verify');
         const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Audit check returned ${response.status}`);
         audit.className = `status${result.valid ? '' : ' bad'}`;
         audit.textContent = result.valid
           ? `Chain valid · ${result.record_count} preserved retrievals`
           : `Chain broken at ${result.first_broken_retrieval_id}`;
         button.textContent = result.valid ? 'Verified just now' : 'Chain needs review';
-      } catch (error) { audit.className = 'status bad'; audit.textContent = 'Audit status unavailable'; }
+      } catch (error) {
+        audit.className = 'status bad';
+        audit.textContent = error instanceof Error && error.message === 'API key required'
+          ? 'Enter an API key to verify the audit ledger'
+          : 'Audit status unavailable';
+        button.textContent = 'Verify audit';
+      }
     }
     async function loadProjects() {
       const response = await apiFetch('/v1/projects');
@@ -613,7 +620,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         const response = await apiFetch('/v1/projects', {method: 'POST', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({name})});
-        if (!response.ok) throw new Error(`Project creation returned ${response.status}`);
+        if (!response.ok) {
+          const result = await response.json().catch(() => ({}));
+          throw new Error(result.error === 'API key required'
+            ? 'This deployment requires an API key. Add it under Remote API key.'
+            : result.error || `Project creation returned ${response.status}`);
+        }
         const created = await response.json();
         nameInput.value = '';
         await loadProjects();
