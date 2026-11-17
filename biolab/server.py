@@ -11,6 +11,7 @@ from starlette.responses import JSONResponse
 from biolab import (
     a2a,
     artifacts,
+    audit,
     auth,
     biorxiv_client,
     clinicaltrials_client,
@@ -21,6 +22,7 @@ from biolab import (
     exports,
     inference,
     pubmed_client,
+    rag,
     ranking,
     retrieval_log,
     tools,
@@ -295,6 +297,57 @@ def create_project(name: str, ctx: Context, description: str = "") -> dict:
 def list_projects(ctx: Context) -> dict:
     """List scientist research projects."""
     return {"projects": workspace.list_projects(_conn, _bound("mcp:user", ctx))}
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def list_project_papers(project_id: str, ctx: Context) -> dict:
+    """List papers selected for a project before parsing."""
+    owner = _bound("mcp:user", ctx)
+    return {"papers": workspace.list_project_retrievals(_conn, project_id, owner)}
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def parse_project_paper(project_id: str, retrieval_id: str, ctx: Context) -> dict:
+    """Parse one selected project paper into reviewable blocks."""
+    owner = _bound("mcp:user", ctx)
+    result = document_parser.create_parser_run_from_retrieval(_conn, project_id, retrieval_id, owner)
+    audit.record(_conn, project_id, "paper_parsed", "parser_run", result["parser_run_id"], owner, {"retrieval_id": retrieval_id, "block_count": result.get("block_count", 0)})
+    _conn.commit()
+    return result
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def review_project_block(parser_run_id: str, block_id: str, review_state: str, ctx: Context, note: str = "") -> dict:
+    """Accept or exclude a parsed block; accepted blocks enter the project RAG."""
+    owner = _bound("mcp:user", ctx)
+    result = document_parser.review_block(_conn, parser_run_id, block_id, review_state, owner, note)
+    run = document_parser.get_parser_run(_conn, parser_run_id)
+    if run and run.get("project_id"):
+        audit.record(_conn, run["project_id"], "parser_block_reviewed", "parsed_block", block_id, owner, {"review_state": result.get("review_state", "")})
+        _conn.commit()
+    return result
+
+
+@mcp.tool(annotations=SEARCH_ANNOTATIONS)
+def search_project_rag(project_id: str, question: str, ctx: Context, top_k: int = 8, sections: list[str] | None = None) -> dict:
+    """Query only accepted parser blocks from one project's paper RAG."""
+    owner = _bound("mcp:user", ctx)
+    if not workspace.has_project_access(_conn, project_id, owner):
+        raise ValueError("project not found")
+    result = rag.search_parser_context(project_id, question, top_k, sections)
+    audit.record(_conn, project_id, "rag_queried", "project", project_id, owner, {"question": question, "status": result.get("status", "")})
+    _conn.commit()
+    return result
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_project_audit(project_id: str, ctx: Context) -> dict:
+    """Verify and return the hash-chained activity history for one project."""
+    owner = _bound("mcp:user", ctx)
+    if not workspace.has_project_access(_conn, project_id, owner):
+        raise ValueError("project not found")
+    valid, broken_id = audit.verify_project(_conn, project_id)
+    return {"project_id": project_id, "valid": valid, "first_broken_event_id": broken_id, "events": audit.list_events(_conn, project_id)}
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
