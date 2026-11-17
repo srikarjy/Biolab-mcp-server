@@ -1,5 +1,9 @@
 # Biolab MCP Server
 
+[![CI](https://github.com/srikarjy/biolab-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/srikarjy/biolab-mcp-server/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/Python-3.11%2B-blue.svg)](pyproject.toml)
+
 Biolab is a small, local-first research workspace for finding papers, saving
 evidence, parsing selected papers, and asking questions over a paper-specific
 RAG index.
@@ -7,6 +11,8 @@ RAG index.
 It keeps source responses, retrieval IDs, parser blocks, citations, and review
 decisions so results can be inspected later. It is a research tool, not medical
 advice or proof that a scientific claim is true.
+
+Live demo: [biolab-a2a.vercel.app](https://biolab-a2a.vercel.app/)
 
 ## What you can do
 
