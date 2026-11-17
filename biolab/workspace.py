@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from biolab import evidence
+from biolab import audit, evidence
 
 RELEVANCE_VALUES = {"unreviewed", "relevant", "excluded", "conflicting", "low_quality"}
 STANCE_VALUES = {"supports", "conflicts", "context", "insufficient"}
@@ -45,6 +45,7 @@ def create_project(conn: Any, name: str, description: str = "", owner_id: str = 
         "INSERT INTO projects (project_id, name, description, created_at, owner_id, organization_id) VALUES (?, ?, ?, ?, ?, ?)",
         tuple(project.values()),
     )
+    audit.record(conn, project["project_id"], "project_created", "project", project["project_id"], owner_id, {"name": project["name"]})
     conn.commit()
     return project
 
@@ -259,7 +260,10 @@ def save_retrieval_to_project(conn: Any, project_id: str, retrieval_id: str, own
     collection = get_collection(conn, row[0], owner_id) if row else create_collection(conn, project_id, "Selected papers", "MCP-retrieved papers selected for parsing", owner_id)
     if collection is None:
         raise ValueError("selected papers collection not found")
-    return add_collection_item(conn, collection["collection_id"], retrieval_id, "Selected for project parsing", "unreviewed", owner_id)
+    result = add_collection_item(conn, collection["collection_id"], retrieval_id, "Selected for project parsing", "unreviewed", owner_id)
+    audit.record(conn, project_id, "paper_selected", "retrieval", retrieval_id, owner_id, {"source": result.get("source", "")})
+    conn.commit()
+    return result
 
 
 def list_project_retrievals(conn: Any, project_id: str, owner_id: str) -> list[dict]:
@@ -287,6 +291,7 @@ def save_project_note(conn: Any, project_id: str, question: str, note_text: str,
         raise ValueError("note_text must not be empty")
     note = {"note_id": str(uuid.uuid4()), "project_id": project_id, "question": question.strip(), "note_text": note_text.strip(), "citations": citations, "created_by": created_by, "created_at": _now()}
     conn.execute("INSERT INTO project_notes (note_id, project_id, question, note_text, citations, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)", (note["note_id"], project_id, note["question"], note["note_text"], json.dumps(citations), created_by, note["created_at"]))
+    audit.record(conn, project_id, "note_saved", "note", note["note_id"], created_by, {"question": note["question"], "citation_count": len(citations)})
     conn.commit()
     return note
 

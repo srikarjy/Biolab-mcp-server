@@ -16,6 +16,7 @@ from starlette.routing import Route
 
 from biolab import (
     a2a,
+    audit,
     auth,
     db,
     document_parser,
@@ -534,6 +535,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           ${report.collections.length} collections · ${report.claims.length} claims · ${(report.parser_runs || []).length} parsed documents · ${report.watches.length} watches<br>
           <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report" target="_blank" rel="noreferrer">Open JSON report ↗</a> ·
           <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report?format=markdown" target="_blank" rel="noreferrer">Open Markdown report ↗</a>
+          <button class="secondary" type="button" data-project-audit="${escapeHtml(projectId)}">Audit project history</button><div class="project-audit" data-project-audit-output></div>
           <hr><strong>Selected MCP papers</strong><div class="muted">Choose a preserved paper from the evidence results above. Biolab parses its saved title/abstract into this project; no re-upload is needed.</div>
           <div class="paper-list" data-project-papers>Loading selected papers…</div>
           <hr><strong>Query this paper RAG</strong>
@@ -566,10 +568,21 @@ DASHBOARD_HTML = r"""<!doctype html>
       } catch (error) { output.textContent = String(error); }
     });
     document.querySelector('#project-detail').addEventListener('click', async (event) => {
+      const projectAudit = event.target.closest('[data-project-audit]');
       const inspect = event.target.closest('[data-parser-inspect]');
       const rebuild = event.target.closest('[data-parser-rebuild]');
       const review = event.target.closest('[data-parser-review]');
       try {
+        if (projectAudit) {
+          projectAudit.disabled = true;
+          const response = await apiFetch(`/v1/projects/${encodeURIComponent(projectAudit.dataset.projectAudit)}/audit`);
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || `Project audit returned ${response.status}`);
+          const output = document.querySelector('[data-project-audit-output]');
+          output.innerHTML = `<strong>${result.valid ? 'Project history valid' : 'Project history broken'}</strong> · ${result.event_count} events` + (result.events.length ? '<div class="audit-events">' + result.events.map(item => `<div class="audit-event"><strong>${escapeHtml(item.event_type)}</strong><span>${escapeHtml(item.created_at)} · ${escapeHtml(item.entity_type)} ${escapeHtml(item.entity_id)}</span></div>`).join('') + '</div>' : '<div class="muted">No project events yet.</div>');
+          projectAudit.textContent = 'Project history checked';
+          return;
+        }
         if (inspect) {
           const runId = inspect.dataset.parserInspect;
           const output = inspect.closest('[data-run-id]').querySelector('[data-parser-output]');
@@ -948,6 +961,8 @@ async def parse_project_retrieval(request: Request) -> JSONResponse:
         result = document_parser.create_parser_run_from_retrieval(
             request.app.state.conn, request.path_params["project_id"], request.path_params["retrieval_id"], auth.request_identity(request)
         )
+        audit.record(request.app.state.conn, request.path_params["project_id"], "paper_parsed", "parser_run", result["parser_run_id"], auth.request_identity(request), {"retrieval_id": request.path_params["retrieval_id"], "block_count": result.get("block_count", 0)})
+        request.app.state.conn.commit()
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     except RuntimeError as exc:
@@ -965,6 +980,8 @@ async def project_rag_search(request: Request) -> JSONResponse:
         if sections is not None and (not isinstance(sections, list) or not all(isinstance(section, str) for section in sections)):
             return JSONResponse({"error": "sections must be a list of strings"}, status_code=400)
         result = rag.search_parser_context(project_id, str(payload.get("question", "")), int(payload.get("top_k", 8)), sections)
+        audit.record(request.app.state.conn, project_id, "rag_queried", "project", project_id, auth.request_identity(request), {"question": str(payload.get("question", "")), "status": result.get("status", "")})
+        request.app.state.conn.commit()
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except RuntimeError as exc:
@@ -1002,6 +1019,10 @@ async def parser_block_review(request: Request) -> JSONResponse:
             request.app.state.conn, request.path_params["parser_run_id"], request.path_params["block_id"],
             str(payload.get("review_state", "")), auth.request_identity(request), str(payload.get("note", "")),
         )
+        run = document_parser.get_parser_run(request.app.state.conn, request.path_params["parser_run_id"])
+        if run and run.get("project_id"):
+            audit.record(request.app.state.conn, run["project_id"], "parser_block_reviewed", "parsed_block", request.path_params["block_id"], auth.request_identity(request), {"review_state": result.get("review_state", "")})
+            request.app.state.conn.commit()
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400 if "review_state" in str(exc) else 404)
     return JSONResponse(result)
@@ -1020,6 +1041,10 @@ async def parser_rebuild_index(request: Request) -> JSONResponse:
         result = document_parser.rebuild_parser_index(
             request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request)
         )
+        run = document_parser.get_parser_run(request.app.state.conn, request.path_params["parser_run_id"])
+        if run and run.get("project_id"):
+            audit.record(request.app.state.conn, run["project_id"], "rag_index_rebuilt", "parser_run", request.path_params["parser_run_id"], auth.request_identity(request), {"indexed_blocks": result.get("indexed_blocks", 0)})
+            request.app.state.conn.commit()
     except ValueError:
         return JSONResponse({"error": "parser run not found"}, status_code=404)
     except RuntimeError as exc:
@@ -1034,6 +1059,16 @@ async def verify(request: Request) -> JSONResponse:
         {"valid": valid, "record_count": count, "first_broken_retrieval_id": broken_id},
         status_code=200 if valid else 409,
     )
+
+
+async def project_audit(request: Request) -> JSONResponse:
+    project_id = request.path_params["project_id"]
+    owner_id = auth.request_identity(request)
+    if not workspace.has_project_access(request.app.state.conn, project_id, owner_id):
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    valid, broken_id = audit.verify_project(request.app.state.conn, project_id)
+    events = audit.list_events(request.app.state.conn, project_id)
+    return JSONResponse({"project_id": project_id, "valid": valid, "event_count": len(events), "first_broken_event_id": broken_id, "events": events}, status_code=200 if valid else 409)
 
 
 async def projects(request: Request) -> JSONResponse:
@@ -1296,6 +1331,7 @@ def api_routes() -> list[Route]:
         Route("/v1/verify", verify),
         Route("/v1/projects", projects, methods=["GET", "POST"]),
         Route("/v1/projects/{project_id}/report", project_report),
+        Route("/v1/projects/{project_id}/audit", project_audit),
         Route("/v1/projects/{project_id}/save-reviewed", save_reviewed_project_evidence, methods=["POST"]),
         Route("/v1/collections", collections, methods=["GET", "POST"]),
         Route("/v1/collections/{collection_id}", collection_detail),

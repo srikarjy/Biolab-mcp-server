@@ -93,6 +93,23 @@ def test_selected_mcp_paper_flows_into_project_parser_and_notes(tmp_path):
     assert notes.status_code == 201
     assert report.json()["papers"][0]["retrieval_id"] == record.retrieval_id
     assert report.json()["notes"][0]["note_text"] == "The reviewed result improved."
+
+
+def test_project_audit_records_history_and_detects_tampering(tmp_path):
+    app = create_app(tmp_path / "project-audit.db", require_auth=False)
+    with TestClient(app) as client:
+        project = client.post("/v1/projects", json={"name": "Audit history"}).json()
+        audit_result = client.get(f"/v1/projects/{project['project_id']}/audit")
+        assert audit_result.status_code == 200
+        assert audit_result.json()["valid"] is True
+        assert audit_result.json()["events"][0]["event_type"] == "project_created"
+
+        app.state.conn.execute("UPDATE audit_events SET payload = '{}' WHERE project_id = ?", (project["project_id"],))
+        app.state.conn.commit()
+        broken = client.get(f"/v1/projects/{project['project_id']}/audit")
+
+    assert broken.status_code == 409
+    assert broken.json()["valid"] is False
 def test_search_api_uses_shared_service(monkeypatch, tmp_path):
     captured = {}
 

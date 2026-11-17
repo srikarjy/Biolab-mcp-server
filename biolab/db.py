@@ -67,6 +67,14 @@ CREATE TABLE IF NOT EXISTS projects (
     organization_id TEXT
 );
 
+CREATE TABLE IF NOT EXISTS audit_events (
+    event_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, event_type TEXT NOT NULL,
+    entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, actor_id TEXT NOT NULL,
+    payload TEXT NOT NULL, created_at TEXT NOT NULL, prev_hash TEXT NOT NULL, event_hash TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_audit_events_project ON audit_events(project_id, created_at);
+
 CREATE TABLE IF NOT EXISTS organizations (
     organization_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
