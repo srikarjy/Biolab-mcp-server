@@ -14,17 +14,30 @@ import os
 import re
 import shutil
 import subprocess
-import uuid
 from datetime import UTC, datetime
 from typing import Any
 from urllib import request
 
 PARSER_MODEL = os.environ.get("HF_PARSER_MODEL", "nvidia/Nemotron-3.5-Parse")
 MAX_DOCUMENT_BYTES = 20 * 1024 * 1024
+MAX_CHUNK_CHARACTERS = 1800
 
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def _clean_text(value: Any) -> str:
+    """Collapse layout whitespace while preserving readable paragraph text."""
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _stable_block_id(page_number: int, block_index: int, block_type: str, text: str) -> str:
+    """Create an id that is stable for the same normalized parser output."""
+    digest = hashlib.sha256(
+        f"{page_number}:{block_index}:{block_type}:{text}".encode()
+    ).hexdigest()[:24]
+    return f"chunk-{digest}"
 
 
 def configured() -> bool:
@@ -47,11 +60,12 @@ def _normalize(raw: Any) -> list[dict[str, Any]]:
             block = {"text": block_value} if isinstance(block_value, str) else block_value
             if not isinstance(block, dict):
                 continue
-            text = str(block.get("text") or block.get("content") or "").strip()
+            text = _clean_text(block.get("text") or block.get("content") or "")
             if not text:
                 continue
+            block_type = str(block.get("type") or block.get("label") or "text")
             blocks.append({
-                "block_id": str(uuid.uuid4()), "page_number": page_number,
+                "block_id": _stable_block_id(page_number, block_index, block_type, text), "page_number": page_number,
                 "block_index": block_index, "block_type": str(block.get("type") or block.get("label") or "text"),
                 "text": text, "bbox": block.get("bbox") or block.get("box"),
             })
@@ -103,5 +117,45 @@ def parse_document(content: bytes, filename: str) -> dict[str, Any]:
 
 
 def fallback_text_blocks(text: str) -> list[dict[str, Any]]:
-    """Create page-zero blocks for text-only API tests and non-PDF source records."""
-    return [{"block_id": str(uuid.uuid4()), "page_number": 0, "block_index": index, "block_type": "text", "text": value.strip(), "bbox": None} for index, value in enumerate(re.split(r"\n{2,}|(?<=[.!?])\s+", text)) if value.strip()]
+    """Create deterministic, page-aware chunks for local parsing.
+
+    Form-feed characters are emitted by ``pdftotext`` at page boundaries. A
+    text-only source has page zero because it has no trustworthy page map.
+    Chunks are intentionally bounded so the later embedding step never has to
+    guess how to split an oversized parser block.
+    """
+    pages = text.split("\f") if "\f" in text else [text]
+    page_numbers = range(1, len(pages) + 1) if len(pages) > 1 else (0,)
+    chunks: list[dict[str, Any]] = []
+    for page_number, page_text in zip(page_numbers, pages, strict=True):
+        candidates = re.split(r"\n{2,}|(?<=[.!?])\s+", page_text)
+        page_index = 0
+        for candidate in candidates:
+            normalized = _clean_text(candidate)
+            if not normalized:
+                continue
+            words = normalized.split()
+            current: list[str] = []
+            current_length = 0
+            pieces = []
+            for word in words:
+                added = len(word) + (1 if current else 0)
+                if current and current_length + added > MAX_CHUNK_CHARACTERS:
+                    pieces.append(" ".join(current))
+                    current = []
+                    current_length = 0
+                current.append(word)
+                current_length += len(word) + (1 if len(current) > 1 else 0)
+            if current:
+                pieces.append(" ".join(current))
+            for piece in pieces:
+                chunks.append({
+                    "block_id": _stable_block_id(page_number, page_index, "text", piece),
+                    "page_number": page_number,
+                    "block_index": page_index,
+                    "block_type": "text",
+                    "text": piece,
+                    "bbox": None,
+                })
+                page_index += 1
+    return chunks

@@ -22,6 +22,31 @@ def test_local_text_parser_works_without_hugging_face_credentials():
     assert parsed["block_count"] == 2
 
 
+def test_local_chunks_are_page_aware_bounded_and_deterministic():
+    content = "Methods were recorded.\n\nResults improved." + " long" * 500 + "\fDiscussion is separate."
+
+    first = hf_parser.fallback_text_blocks(content)
+    second = hf_parser.fallback_text_blocks(content)
+
+    assert first == second
+    assert [block["page_number"] for block in first[:-1]] == [1, 1, 1, 1]
+    assert first[-1]["page_number"] == 2
+    assert all(len(block["text"]) <= hf_parser.MAX_CHUNK_CHARACTERS for block in first)
+    assert all(block["block_id"].startswith("chunk-") for block in first)
+    assert first[-1]["text"] == "Discussion is separate."
+
+
+def test_normalized_parser_blocks_have_stable_ids():
+    raw = {"pages": [{"page": 3, "blocks": [{"type": "paragraph", "text": "  Results  improved.  "}]}]}
+
+    first = hf_parser._normalize(raw)
+    second = hf_parser._normalize(raw)
+
+    assert first == second
+    assert first[0]["text"] == "Results improved."
+    assert first[0]["block_id"].startswith("chunk-")
+
+
 def test_parser_run_persists_page_aware_blocks_and_flushes(monkeypatch, tmp_path):
     conn = db.connect(str(tmp_path / "parser.db"))
     monkeypatch.setattr(hf_parser, "parse_document", lambda content, filename: {
