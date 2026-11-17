@@ -13,6 +13,10 @@ _local_model: Any = None
 _local_model_name: str | None = None
 
 
+def baidu_enabled() -> bool:
+    return bool(os.environ.get("BAIDU_QIANFAN_API_KEY")) or os.environ.get("BIOLAB_EMBEDDING_PROVIDER", "").lower() == "baidu"
+
+
 def local_enabled() -> bool:
     return os.environ.get("BIOLAB_LOCAL_EMBEDDINGS", "").lower() in {"1", "true", "yes", "on"}
 
@@ -28,7 +32,7 @@ def free_enabled() -> bool:
 def dimension() -> int:
     if os.environ.get("BIOLAB_EMBEDDING_DIMENSION"):
         return int(os.environ["BIOLAB_EMBEDDING_DIMENSION"])
-    return 384 if local_enabled() or free_enabled() else 1536
+    return 384 if local_enabled() or free_enabled() or baidu_enabled() else 1536
 
 
 def model_name() -> str:
@@ -36,10 +40,12 @@ def model_name() -> str:
         return os.environ.get("BIOLAB_LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
     if free_enabled():
         return "biolab-feature-hash-v1"
+    if baidu_enabled():
+        return os.environ.get("BAIDU_QIANFAN_EMBEDDING_MODEL", "embedding-v1")
     return os.environ.get("BIOLAB_EMBEDDING_MODEL", "text-embedding-3-small")
 
 def configured() -> bool:
-    return local_enabled() or free_enabled() or bool(os.environ.get("BIOLAB_EMBEDDING_API_KEY") and os.environ.get("BIOLAB_EMBEDDING_API_URL"))
+    return local_enabled() or free_enabled() or baidu_enabled() or bool(os.environ.get("BIOLAB_EMBEDDING_API_KEY") and os.environ.get("BIOLAB_EMBEDDING_API_URL"))
 
 
 def _free_embed(texts: list[str]) -> list[list[float]]:
@@ -80,12 +86,20 @@ def embed(texts: list[str]) -> list[list[float]]:
         return _free_embed(texts)
     if not configured():
         raise RuntimeError("configure local embeddings or BIOLAB_EMBEDDING_API_KEY and BIOLAB_EMBEDDING_API_URL for pgvector RAG")
-    payload = json.dumps({"model": os.environ.get("BIOLAB_EMBEDDING_MODEL", "text-embedding-3-small"), "input": texts}).encode()
-    req = request.Request(
-        os.environ["BIOLAB_EMBEDDING_API_URL"], data=payload,
-        headers={"Authorization": f"Bearer {os.environ['BIOLAB_EMBEDDING_API_KEY']}", "Content-Type": "application/json"},
-        method="POST",
-    )
-    with request.urlopen(req, timeout=float(os.environ.get("BIOLAB_EMBEDDING_TIMEOUT_SECONDS", "30"))) as response:
-        result = json.loads(response.read().decode())
-    return [item["embedding"] for item in sorted(result["data"], key=lambda item: item["index"])]
+    endpoint = os.environ.get("BIOLAB_EMBEDDING_API_URL", "https://qianfan.baidubce.com/v2/embeddings" if baidu_enabled() else "")
+    api_key = os.environ.get("BAIDU_QIANFAN_API_KEY", "") if baidu_enabled() else os.environ["BIOLAB_EMBEDDING_API_KEY"]
+    model = model_name()
+    batch_size = 16 if baidu_enabled() else len(texts)
+    vectors: list[list[float]] = []
+    for start in range(0, len(texts), batch_size):
+        batch = texts[start:start + batch_size]
+        payload = json.dumps({"model": model, "input": batch}).encode()
+        req = request.Request(
+            endpoint, data=payload,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            method="POST",
+        )
+        with request.urlopen(req, timeout=float(os.environ.get("BIOLAB_EMBEDDING_TIMEOUT_SECONDS", "30"))) as response:
+            result = json.loads(response.read().decode())
+        vectors.extend(item["embedding"] for item in sorted(result["data"], key=lambda item: item["index"]))
+    return vectors

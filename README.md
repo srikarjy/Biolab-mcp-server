@@ -141,6 +141,22 @@ baseline that requires no model download or API key. Set
 demonstrations, not a validated scientific embedding model. For better local
 semantic retrieval, use BGE-small as shown above.
 
+### Baidu Qianfan embeddings
+
+To use Baidu's 384-dimensional `Embedding-V1` model, set the API key in the
+deployment environment. The client batches requests in groups of 16 to match
+Qianfan's documented limit:
+
+```bash
+export BIOLAB_EMBEDDING_PROVIDER=baidu
+export BAIDU_QIANFAN_API_KEY="your-qianfan-api-key"
+export BAIDU_QIANFAN_EMBEDDING_MODEL=embedding-v1
+export BIOLAB_EMBEDDING_DIMENSION=384
+```
+
+After switching providers, rebuild the project indexes; vectors from different
+embedding models must not be mixed. Keep the key out of Git and browser code.
+
 ## Tests
 
 Run the normal test suite:
