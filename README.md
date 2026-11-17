@@ -133,6 +133,14 @@ Only blocks marked `accepted` are added to the project index. Search is scoped
 to the selected project and can be filtered by sections such as `methods` or
 `results`.
 
+### Hosted demo without a paid embedding API
+
+The hosted demo can use `biolab-feature-hash-v1`, a deterministic lexical
+baseline that requires no model download or API key. Set
+`BIOLAB_FREE_EMBEDDINGS=1` with `PGVECTOR_DATABASE_URL`. This is for workflow
+demonstrations, not a validated scientific embedding model. For better local
+semantic retrieval, use BGE-small as shown above.
+
 ## Tests
 
 Run the normal test suite:
@@ -166,6 +174,19 @@ biolab web --allow-anonymous
 
 The retrieval log is hash-chained for tamper evidence. It is not an immutable
 ledger and does not replace backups, access control, or scientific review.
+
+To detect truncation or rewriting across a backup, create a signed checkpoint
+with a secret that is not stored in the database:
+
+```bash
+export BIOLAB_ANCHOR_KEY="$(openssl rand -hex 32)"
+biolab anchor retrievals.anchor.json --chain retrievals
+biolab verify-anchor retrievals.anchor.json --chain retrievals
+```
+
+Keep the anchor file and `BIOLAB_ANCHOR_KEY` in separate protected storage. A
+valid chain means the stored records are internally consistent; it does not
+prove that a paper is scientifically correct.
 
 For production deployments, configure a durable database and keep API keys in
 the deployment environment. Never commit credentials to this repository.
