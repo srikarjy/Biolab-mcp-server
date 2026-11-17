@@ -14,6 +14,15 @@ advice or proof that a scientific claim is true.
 
 Live demo: [biolab-a2a.vercel.app](https://biolab-a2a.vercel.app/)
 
+## Tech stack
+
+- Python 3.11+, Starlette, Typer, and MCP
+- SQLite/libSQL for local project and provenance data
+- Neon Postgres with `pgvector` for hosted RAG vectors
+- NVIDIA NIM hosted embeddings (`nemotron-3.5-embed-1b`) with a free offline fallback
+- PubMed, bioRxiv, medRxiv, and ClinicalTrials.gov connectors
+- Vercel serverless deployment
+
 ## What you can do
 
 1. Search PubMed and other life-science sources.
@@ -22,6 +31,7 @@ Live demo: [biolab-a2a.vercel.app](https://biolab-a2a.vercel.app/)
 4. Review blocks and index accepted blocks in pgvector.
 5. Search the project RAG and save notes with citations.
 6. Download the parsed paper JSON.
+7. Audit the selected project's hash-chained history.
 
 The browser has two main pages:
 
@@ -81,6 +91,7 @@ POST /v1/projects/{project_id}/retrievals
 POST /v1/projects/{project_id}/retrievals/{retrieval_id}/parse
 GET  /v1/projects/{project_id}/parser-runs
 POST /v1/projects/{project_id}/rag/search
+GET  /v1/projects/{project_id}/audit
 GET  /v1/parser/runs/{parser_run_id}/download
 POST /v1/projects/{project_id}/rag/notes
 ```
@@ -174,6 +185,9 @@ After switching from another provider, rebuild the project indexes. NVIDIA
 lists this as a free endpoint, but access is still subject to its API trial
 terms and quotas.
 
+If the NVIDIA key is not configured, the hosted demo uses the deterministic
+feature-hash fallback so the complete project workflow remains demonstrable.
+
 ## Tests
 
 Run the normal test suite:
@@ -207,6 +221,10 @@ biolab web --allow-anonymous
 
 The retrieval log is hash-chained for tamper evidence. It is not an immutable
 ledger and does not replace backups, access control, or scientific review.
+
+Each project also has a separate **Audit project history** action. It verifies
+and displays project events such as paper selection, parsing, parser review,
+RAG queries, index rebuilds, and saved notes.
 
 To detect truncation or rewriting across a backup, create a signed checkpoint
 with a secret that is not stored in the database:
