@@ -5,6 +5,7 @@ same evidence and retrieval services as the CLI and MCP server.
 """
 
 import base64
+import hashlib
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -310,8 +311,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       <section id="ranking-section" class="ranking-section" hidden aria-labelledby="ranking-title">
         <div class="results-head"><div><p class="eyebrow">Review queue</p><h2 id="ranking-title">Top-ranked papers</h2><p id="ranking-summary" class="summary">Ranking preserved results…</p></div><span class="badge">Step 03 / review</span></div>
         <div id="ranking-results" class="ranking-cards"></div>
+        <label class="project-picker-label" for="project-picker">Project for accepted papers
+          <select id="project-picker"><option value="">Choose a project…</option></select>
+        </label>
         <button id="generate-insights" class="secondary" type="button" style="margin-top:14px">Generate grounded insights</button>
-        <button id="save-reviewed" class="secondary" type="button" style="margin:14px 0 0 8px" disabled>Save accepted papers to selected project</button>
+        <button id="save-reviewed" class="secondary" type="button" style="margin:14px 0 0 8px" disabled>Save accepted papers to project</button>
       </section>
       <section id="insight-section" class="insight-section" hidden aria-labelledby="insight-title">
         <div class="results-head"><div><p class="eyebrow">Evidence-grounded inference</p><h2 id="insight-title">Extracted insights</h2><p id="insight-summary" class="summary"></p></div><span class="badge">Step 04 / cite</span></div>
@@ -329,6 +333,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     const rankingResults = document.querySelector('#ranking-results');
     const generateInsights = document.querySelector('#generate-insights');
     const saveReviewed = document.querySelector('#save-reviewed');
+    const projectPicker = document.querySelector('#project-picker');
     const insightSection = document.querySelector('#insight-section');
     const insightSummary = document.querySelector('#insight-summary');
     const insights = document.querySelector('#insights');
@@ -401,7 +406,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       finally { button.disabled = false; }
     });
     saveReviewed.addEventListener('click', async () => {
-      if (!latestProjectId || !latestRanking) return;
+      latestProjectId = projectPicker.value || latestProjectId;
+      if (!latestProjectId || !latestRanking) { projectPicker.focus(); return; }
       const accepted = latestRanking.candidates.filter(candidate => candidate.review_state === 'accepted').map(candidate => candidate.ranking_candidate_id);
       if (!accepted.length) return;
       saveReviewed.disabled = true;
@@ -413,6 +419,10 @@ DASHBOARD_HTML = r"""<!doctype html>
         document.querySelector('#project-detail').textContent = `Saved ${result.saved_count} reviewed paper(s) to the project collection.`;
       } catch (error) { document.querySelector('#project-detail').textContent = String(error); }
       finally { saveReviewed.disabled = false; }
+    });
+    projectPicker.addEventListener('change', () => {
+      latestProjectId = projectPicker.value || null;
+      saveReviewed.disabled = !(latestProjectId && latestRanking?.candidates?.some(candidate => candidate.review_state === 'accepted'));
     });
     function renderInsights(result) {
       insightSummary.textContent = `${result.insight_count ?? result.claims?.length ?? 0} grounded insights · ${result.parser_version}` + (result.durability === 'request-context' ? ' · session evidence only; configure Turso for durable citations' : '');
@@ -472,6 +482,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     async function loadProjects() {
       const response = await apiFetch('/v1/projects');
       const result = await response.json();
+      projectPicker.innerHTML = '<option value="">Choose a project…</option>' + result.projects.map(p => `<option value="${escapeHtml(p.project_id)}">${escapeHtml(p.name)}</option>`).join('');
       document.querySelector('#projects').innerHTML = result.projects.length
         ? result.projects.map(p => `<li><button class="project-item" type="button" data-project-id="${escapeHtml(p.project_id)}"><strong>${escapeHtml(p.name)}</strong><code>${escapeHtml(maskId(p.project_id))}</code></button></li>`).join('')
         : '<li class="muted">No projects yet.</li>';
@@ -502,10 +513,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       const response = await apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/retrievals`);
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || `Paper list returned ${response.status}`);
-      container.innerHTML = result.retrievals.length ? result.retrievals.map(paper => {
+      container.innerHTML = result.retrievals.length ? '<div class="paper-selection-actions"><button class="secondary" type="button" data-parse-selected="'+escapeHtml(projectId)+'">Parse selected papers</button><span class="muted">Select only the papers you want in this project RAG.</span></div>' + result.retrievals.map(paper => {
         const snap = paper.snapshot || {};
         const title = snap.title || snap.name || snap.primary_accession || paper.external_id;
-        return `<article class="paper-card"><strong>${escapeHtml(title)}</strong><br><span class="muted">${escapeHtml(paper.source)} · ${escapeHtml(paper.external_id)} · ${escapeHtml(paper.relevance)}</span><br>
+        return `<article class="paper-card"><label><input type="checkbox" data-paper-select="${escapeHtml(paper.retrieval_id)}" ${paper.parser_run_id ? 'checked' : ''}> <strong>${escapeHtml(title)}</strong></label><br><span class="muted">${escapeHtml(paper.source)} · ${escapeHtml(paper.external_id)} · ${escapeHtml(paper.relevance)}</span><br>
           ${paper.parser_run_id ? `<span class="badge">Parsed into project</span>` : `<button class="secondary" type="button" data-paper-parse="${escapeHtml(paper.retrieval_id)}">Parse this MCP paper</button>`}</article>`;
       }).join('') : '<div class="muted">No MCP papers selected yet. Search above, accept a result, then select it for this project.</div>';
       if (notes) {
@@ -550,7 +561,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     document.querySelector('#verify').addEventListener('click', verify);
     document.querySelector('#projects').addEventListener('click', (event) => {
       const button = event.target.closest('[data-project-id]');
-      if (button) window.location.href = `/projects/${encodeURIComponent(button.dataset.projectId)}`;
+      if (button) { latestProjectId = button.dataset.projectId; projectPicker.value = latestProjectId; window.location.href = `/projects/${encodeURIComponent(button.dataset.projectId)}`; }
     });
     document.querySelector('#project-detail').addEventListener('submit', async (event) => {
       const form = event.target.closest('[data-rag-query]');
@@ -572,7 +583,19 @@ DASHBOARD_HTML = r"""<!doctype html>
       const inspect = event.target.closest('[data-parser-inspect]');
       const rebuild = event.target.closest('[data-parser-rebuild]');
       const review = event.target.closest('[data-parser-review]');
+      const parseSelected = event.target.closest('[data-parse-selected]');
       try {
+        if (parseSelected) {
+          const projectId = parseSelected.dataset.parseSelected;
+          const selected = [...document.querySelectorAll('[data-paper-select]:checked')].map(item => item.dataset.paperSelect);
+          if (!selected.length) throw new Error('Select at least one paper to parse.');
+          parseSelected.disabled = true;
+          for (const retrievalId of selected) {
+            await apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/retrievals/${encodeURIComponent(retrievalId)}/parse`, {method: 'POST'});
+          }
+          await loadProject(projectId);
+          return;
+        }
         if (projectAudit) {
           projectAudit.disabled = true;
           const response = await apiFetch(`/v1/projects/${encodeURIComponent(projectAudit.dataset.projectAudit)}/audit`);
@@ -979,8 +1002,18 @@ async def project_rag_search(request: Request) -> JSONResponse:
         sections = payload.get("sections")
         if sections is not None and (not isinstance(sections, list) or not all(isinstance(section, str) for section in sections)):
             return JSONResponse({"error": "sections must be a list of strings"}, status_code=400)
-        result = rag.search_parser_context(project_id, str(payload.get("question", "")), int(payload.get("top_k", 8)), sections)
-        audit.record(request.app.state.conn, project_id, "rag_queried", "project", project_id, auth.request_identity(request), {"question": str(payload.get("question", "")), "status": result.get("status", "")})
+        question = str(payload.get("question", "")).strip()
+        question_key = hashlib.sha256(json.dumps({"question": question.casefold(), "top_k": int(payload.get("top_k", 8)), "sections": sections or []}, sort_keys=True).encode()).hexdigest()
+        cached = request.app.state.conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key)).fetchone()
+        if cached:
+            result = json.loads(cached[0])
+            result["cached"] = True
+        else:
+            result = rag.search_parser_context(project_id, question, int(payload.get("top_k", 8)), sections)
+            result["cached"] = False
+            if result.get("status") == "active":
+                request.app.state.conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, question_key, question, json.dumps(result), result.get("embedding_model", rag.embedding_client.model_name()),))
+        audit.record(request.app.state.conn, project_id, "rag_queried", "project", project_id, auth.request_identity(request), {"question": question, "status": result.get("status", ""), "cached": bool(cached)})
         request.app.state.conn.commit()
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)

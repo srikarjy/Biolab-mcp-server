@@ -75,6 +75,12 @@ CREATE TABLE IF NOT EXISTS audit_events (
 );
 CREATE INDEX IF NOT EXISTS idx_audit_events_project ON audit_events(project_id, created_at);
 
+CREATE TABLE IF NOT EXISTS rag_query_cache (
+    project_id TEXT NOT NULL, question_key TEXT NOT NULL, question TEXT NOT NULL,
+    result_json TEXT NOT NULL, created_at TEXT NOT NULL, embedding_model TEXT NOT NULL,
+    PRIMARY KEY (project_id, question_key), FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+
 CREATE TABLE IF NOT EXISTS organizations (
     organization_id TEXT PRIMARY KEY,
     name TEXT NOT NULL,

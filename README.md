@@ -100,6 +100,36 @@ The download route returns an attachment such as `paper.parsed.json`. It
 contains parsed blocks and metadata. The original PDF is not retained by the
 parser endpoint.
 
+## Paper-to-RAG workflow
+
+After searching, accept the papers you want and choose a project in the project
+picker. The selected papers appear on that project's second page. There you can
+select one or more papers, parse them, review their blocks, accept only useful
+blocks for RAG, and query the resulting paper-specific index.
+
+The project page stores exact questions and successful RAG results in a small
+project-scoped cache. Repeating the same question with the same sections and
+result limit returns the cached evidence and is marked `cached: true`.
+
+`Generate grounded insights` is for the older evidence-ranking workflow: it
+extracts citation-backed claims from preserved retrievals. `Save accepted
+papers to project` saves reviewed ranking candidates into the selected project;
+it is separate from the project-page parser/RAG flow. The project picker now
+makes that destination explicit.
+
+The architecture is:
+
+```text
+MCP/source connectors -> retrieval ledger -> project selection
+    -> parser blocks -> human review -> NVIDIA embeddings
+    -> Neon pgvector -> similarity search -> cached cited passages/notes
+```
+
+ChatGPT does not permanently learn the papers. When connected to this MCP
+server, it can call the exposed tools, retrieve the selected project's evidence,
+and receive the cited passages. The project database and audit history preserve
+what was queried and used for later review.
+
 ## Free local RAG
 
 The free path runs embeddings on your computer with BGE-small. It does not

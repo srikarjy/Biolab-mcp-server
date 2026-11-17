@@ -2,7 +2,7 @@
 
 import base64
 
-from biolab import auth, evidence, retrieval_log
+from biolab import auth, evidence, rag, retrieval_log
 from biolab.web import create_app
 from starlette.testclient import TestClient
 
@@ -110,6 +110,25 @@ def test_project_audit_records_history_and_detects_tampering(tmp_path):
 
     assert broken.status_code == 409
     assert broken.json()["valid"] is False
+
+
+def test_project_rag_query_is_cached(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_search(project_id, question, top_k, sections):
+        calls.append((project_id, question, top_k, sections))
+        return {"status": "active", "chunks": [{"chunk_text": "cached evidence"}]}
+
+    monkeypatch.setattr(rag, "search_parser_context", fake_search)
+    with TestClient(create_app(tmp_path / "rag-cache.db", require_auth=False)) as client:
+        project = client.post("/v1/projects", json={"name": "Cached RAG"}).json()
+        path = f"/v1/projects/{project['project_id']}/rag/search"
+        first = client.post(path, json={"question": "What changed?", "top_k": 3})
+        second = client.post(path, json={"question": "What changed?", "top_k": 3})
+
+    assert first.json()["cached"] is False
+    assert second.json()["cached"] is True
+    assert len(calls) == 1
 def test_search_api_uses_shared_service(monkeypatch, tmp_path):
     captured = {}
 
