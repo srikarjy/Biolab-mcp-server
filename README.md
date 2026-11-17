@@ -157,6 +157,23 @@ export BIOLAB_EMBEDDING_DIMENSION=384
 After switching providers, rebuild the project indexes; vectors from different
 embedding models must not be mixed. Keep the key out of Git and browser code.
 
+### NVIDIA hosted embeddings
+
+NVIDIA's free Build endpoint supports `nvidia/nemotron-3.5-embed-1b` for
+multilingual text and document retrieval. The hosted model returns normalized
+2048-dimensional vectors through an OpenAI-compatible endpoint:
+
+```bash
+export BIOLAB_EMBEDDING_PROVIDER=nvidia
+export NVIDIA_API_KEY="your-build-nvidia-key"
+export NVIDIA_EMBEDDING_MODEL=nvidia/nemotron-3.5-embed-1b
+export NVIDIA_EMBEDDING_DIMENSION=2048
+```
+
+After switching from another provider, rebuild the project indexes. NVIDIA
+lists this as a free endpoint, but access is still subject to its API trial
+terms and quotas.
+
 ## Tests
 
 Run the normal test suite:

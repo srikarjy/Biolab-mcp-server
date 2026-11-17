@@ -20,3 +20,16 @@ def test_free_embeddings_stay_available_without_provider_key(monkeypatch):
     assert len(vectors) == 2
     assert len(vectors[0]) == 384
     assert vectors[0] == vectors[1]
+
+
+def test_nvidia_configuration_uses_nemotron_defaults(monkeypatch):
+    monkeypatch.delenv("BAIDU_QIANFAN_API_KEY", raising=False)
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+    monkeypatch.setenv("BIOLAB_EMBEDDING_PROVIDER", "nvidia")
+    monkeypatch.delenv("BIOLAB_FREE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("BIOLAB_LOCAL_EMBEDDINGS", raising=False)
+
+    assert embedding_client.nvidia_enabled()
+    assert embedding_client.model_name() == "nvidia/nemotron-3.5-embed-1b"
+    assert embedding_client.dimension() == 2048
+    assert embedding_client.configured()

@@ -17,6 +17,10 @@ def baidu_enabled() -> bool:
     return bool(os.environ.get("BAIDU_QIANFAN_API_KEY")) or os.environ.get("BIOLAB_EMBEDDING_PROVIDER", "").lower() == "baidu"
 
 
+def nvidia_enabled() -> bool:
+    return bool(os.environ.get("NVIDIA_API_KEY")) or os.environ.get("BIOLAB_EMBEDDING_PROVIDER", "").lower() == "nvidia"
+
+
 def local_enabled() -> bool:
     return os.environ.get("BIOLAB_LOCAL_EMBEDDINGS", "").lower() in {"1", "true", "yes", "on"}
 
@@ -32,7 +36,11 @@ def free_enabled() -> bool:
 def dimension() -> int:
     if os.environ.get("BIOLAB_EMBEDDING_DIMENSION"):
         return int(os.environ["BIOLAB_EMBEDDING_DIMENSION"])
-    return 384 if local_enabled() or free_enabled() or baidu_enabled() else 1536
+    if local_enabled() or free_enabled() or baidu_enabled():
+        return 384
+    if nvidia_enabled():
+        return int(os.environ.get("NVIDIA_EMBEDDING_DIMENSION", "2048"))
+    return 1536
 
 
 def model_name() -> str:
@@ -42,10 +50,12 @@ def model_name() -> str:
         return "biolab-feature-hash-v1"
     if baidu_enabled():
         return os.environ.get("BAIDU_QIANFAN_EMBEDDING_MODEL", "embedding-v1")
+    if nvidia_enabled():
+        return os.environ.get("NVIDIA_EMBEDDING_MODEL", "nvidia/nemotron-3.5-embed-1b")
     return os.environ.get("BIOLAB_EMBEDDING_MODEL", "text-embedding-3-small")
 
 def configured() -> bool:
-    return local_enabled() or free_enabled() or baidu_enabled() or bool(os.environ.get("BIOLAB_EMBEDDING_API_KEY") and os.environ.get("BIOLAB_EMBEDDING_API_URL"))
+    return local_enabled() or free_enabled() or baidu_enabled() or nvidia_enabled() or bool(os.environ.get("BIOLAB_EMBEDDING_API_KEY") and os.environ.get("BIOLAB_EMBEDDING_API_URL"))
 
 
 def _free_embed(texts: list[str]) -> list[list[float]]:
@@ -86,8 +96,14 @@ def embed(texts: list[str]) -> list[list[float]]:
         return _free_embed(texts)
     if not configured():
         raise RuntimeError("configure local embeddings or BIOLAB_EMBEDDING_API_KEY and BIOLAB_EMBEDDING_API_URL for pgvector RAG")
-    endpoint = os.environ.get("BIOLAB_EMBEDDING_API_URL", "https://qianfan.baidubce.com/v2/embeddings" if baidu_enabled() else "")
-    api_key = os.environ.get("BAIDU_QIANFAN_API_KEY", "") if baidu_enabled() else os.environ["BIOLAB_EMBEDDING_API_KEY"]
+    default_endpoint = "https://qianfan.baidubce.com/v2/embeddings" if baidu_enabled() else "https://integrate.api.nvidia.com/v1/embeddings" if nvidia_enabled() else ""
+    endpoint = os.environ.get("BIOLAB_EMBEDDING_API_URL", default_endpoint)
+    if baidu_enabled():
+        api_key = os.environ.get("BAIDU_QIANFAN_API_KEY", "")
+    elif nvidia_enabled():
+        api_key = os.environ.get("NVIDIA_API_KEY", "")
+    else:
+        api_key = os.environ["BIOLAB_EMBEDDING_API_KEY"]
     model = model_name()
     batch_size = 16 if baidu_enabled() else len(texts)
     vectors: list[list[float]] = []
