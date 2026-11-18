@@ -131,6 +131,19 @@ def validate_rag_result(conn: Any, project_id: str, result: dict[str, Any]) -> N
             raise ValueError("answer span is not present in its cited retrieved block")
 
 
+def project_corpus_fingerprint(conn: Any, project_id: str) -> str:
+    """Hash the accepted project corpus used to make cached answers."""
+    rows = conn.execute(
+        """SELECT p.block_id, p.content_hash, p.review_state, r.source_hash
+           FROM parsed_blocks p JOIN parser_runs r ON r.parser_run_id = p.parser_run_id
+           WHERE r.project_id = ? ORDER BY p.block_id""",
+        (project_id,),
+    ).fetchall()
+    payload = [{"block_id": row[0], "content_hash": row[1], "review_state": row[2], "source_hash": row[3]} for row in rows]
+    payload.append({"serialization": "project-corpus-v1"})
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def review_block(conn: Any, parser_run_id: str, block_id: str, review_state: str, reviewed_by: str, note: str = "") -> dict[str, Any]:
     if review_state not in REVIEW_STATES - {"pending"}:
         raise ValueError("review_state must be accepted or excluded")

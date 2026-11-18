@@ -1009,7 +1009,8 @@ async def project_rag_search(request: Request) -> JSONResponse:
             return JSONResponse({"error": "sections must be a list of strings"}, status_code=400)
         question = str(payload.get("question", "")).strip()
         top_k = int(payload.get("top_k", 8))
-        question_key = rag.query_key(question, top_k, sections, "search")
+        corpus_fingerprint = document_parser.project_corpus_fingerprint(request.app.state.conn, project_id)
+        question_key = rag.query_key(question, top_k, sections, "search", corpus_fingerprint)
         cached = request.app.state.conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key)).fetchone()
         if cached:
             result = json.loads(cached[0])
@@ -1040,7 +1041,8 @@ async def project_rag_answer(request: Request) -> JSONResponse:
             return JSONResponse({"error": "sections must be a list of strings"}, status_code=400)
         question = str(payload.get("question", "")).strip()
         top_k = int(payload.get("top_k", 8))
-        question_key = rag.query_key(question, top_k, sections, "answer")
+        corpus_fingerprint = document_parser.project_corpus_fingerprint(request.app.state.conn, project_id)
+        question_key = rag.query_key(question, top_k, sections, "answer", corpus_fingerprint)
         cached = request.app.state.conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key)).fetchone()
         if cached:
             result = json.loads(cached[0])

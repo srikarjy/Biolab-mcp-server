@@ -346,7 +346,8 @@ def answer_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
     owner = _bound("mcp:user", ctx)
     if not workspace.has_project_access(_conn, project_id, owner):
         raise ValueError("project not found")
-    key = rag.query_key(question, top_k, sections, "answer")
+    corpus_fingerprint = document_parser.project_corpus_fingerprint(_conn, project_id)
+    key = rag.query_key(question, top_k, sections, "answer", corpus_fingerprint)
     cached = _conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, key)).fetchone()
     if cached:
         result = json.loads(cached[0])

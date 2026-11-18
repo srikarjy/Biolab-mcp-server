@@ -11,6 +11,7 @@ from urllib import request
 
 _local_model: Any = None
 _local_model_name: str | None = None
+EMBEDDING_SERIALIZATION_VERSION = "embedding-text-v1"
 
 
 def baidu_enabled() -> bool:
@@ -69,6 +70,19 @@ def model_name() -> str:
     if selected == "nvidia":
         return os.environ.get("NVIDIA_EMBEDDING_MODEL", "nvidia/nemotron-3.5-embed-1b")
     return os.environ.get("BIOLAB_EMBEDDING_MODEL", "text-embedding-3-small")
+
+
+def fingerprint() -> str:
+    """Identify the exact vector contract used for indexing and querying."""
+    payload = {
+        "provider": provider(),
+        "model": model_name(),
+        "revision": os.environ.get("BIOLAB_EMBEDDING_REVISION", "unspecified"),
+        "dimension": dimension(),
+        "normalization": "l2",
+        "serialization": EMBEDDING_SERIALIZATION_VERSION,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 def configured() -> bool:
     return provider() != "none"

@@ -100,6 +100,25 @@ def test_rag_citation_validation_requires_current_accepted_block(tmp_path):
         document_parser.validate_citations(conn, project["project_id"], [{"block_id": "missing", "page_number": 2, "content_hash": "hash-citation"}])
 
 
+def test_project_corpus_fingerprint_changes_when_reviewed_content_changes(tmp_path):
+    conn = db.connect(str(tmp_path / "corpus-fingerprint.db"))
+    project = document_parser.workspace.create_project(conn, "Corpus", owner_id="scientist")
+    conn.execute(
+        "INSERT INTO parser_runs (parser_run_id, project_id, document_id, filename, parser_model, source_hash, status, block_count, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("run-fingerprint", project["project_id"], "doc-fingerprint", "paper.txt", "test", "source", "succeeded", 1, "scientist", "now"),
+    )
+    conn.execute(
+        "INSERT INTO parsed_blocks (block_id, parser_run_id, page_number, block_index, block_type, section_name, text, bbox, metadata, content_hash, review_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("block-fingerprint", "run-fingerprint", 1, 0, "paragraph", "results", "Evidence", "null", "{}", "hash-1", "pending", "now"),
+    )
+    conn.commit()
+    pending = document_parser.project_corpus_fingerprint(conn, project["project_id"])
+    conn.execute("UPDATE parsed_blocks SET review_state = 'accepted', content_hash = 'hash-2' WHERE block_id = ?", ("block-fingerprint",))
+    conn.commit()
+
+    assert document_parser.project_corpus_fingerprint(conn, project["project_id"]) != pending
+
+
 def test_accepted_unassigned_block_is_not_written_to_project_rag(monkeypatch, tmp_path):
     conn = db.connect(str(tmp_path / "unassigned.db"))
     monkeypatch.setattr(hf_parser, "parse_document", lambda content, filename: {

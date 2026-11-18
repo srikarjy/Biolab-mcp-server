@@ -6,6 +6,12 @@ def test_query_key_separates_search_and_answer_modes():
     assert rag.query_key("What changed?", 5, ["results"], "search") != rag.query_key("What changed?", 5, ["results"], "answer")
 
 
+def test_query_key_changes_when_corpus_or_embedding_changes():
+    base = rag.query_key("What changed?", 5, corpus_fingerprint="corpus-1", embedding_fingerprint="embed-1")
+    assert rag.query_key("What changed?", 5, corpus_fingerprint="corpus-2", embedding_fingerprint="embed-1") != base
+    assert rag.query_key("What changed?", 5, corpus_fingerprint="corpus-1", embedding_fingerprint="embed-2") != base
+
+
 class FakeVectorStore:
     indexed: list[dict] = []
     search_args: tuple = ()

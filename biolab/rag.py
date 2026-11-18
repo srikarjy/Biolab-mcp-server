@@ -13,9 +13,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from biolab import embedding_client
 
 
-def query_key(question: str, top_k: int, sections: list[str] | None = None, mode: str = "search") -> str:
+def query_key(question: str, top_k: int, sections: list[str] | None = None, mode: str = "search", corpus_fingerprint: str = "", embedding_fingerprint: str | None = None) -> str:
     """Return a stable cache key for one project-scoped RAG operation."""
-    payload = {"mode": mode, "question": question.casefold().strip(), "top_k": top_k, "sections": sections or []}
+    payload = {"mode": mode, "question": question.casefold().strip(), "top_k": top_k, "sections": sections or [], "corpus": corpus_fingerprint, "embedding": embedding_fingerprint or embedding_client.fingerprint(), "algorithm": "project-rag-v2"}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -68,6 +68,7 @@ class PgVectorStore:
         self.dimension = dimension or embedding_client.dimension()
         self.embedding_model = embedding_client.model_name()
         self.embedding_revision = os.environ.get("BIOLAB_EMBEDDING_REVISION", "unspecified")
+        self.embedding_fingerprint = embedding_client.fingerprint()
         if not self.dsn:
             raise RuntimeError("DATABASE_URL or PGVECTOR_DATABASE_URL is not configured")
         try:
@@ -96,6 +97,7 @@ class PgVectorStore:
                     metadata_json TEXT NOT NULL DEFAULT '{{}}',
                     content_hash TEXT NOT NULL, review_state TEXT NOT NULL DEFAULT 'accepted',
                     embedding_model TEXT NOT NULL, embedding_revision TEXT NOT NULL,
+                    embedding_fingerprint TEXT NOT NULL DEFAULT '',
                     embedding_dimension INTEGER NOT NULL,
                     embedding vector({self.dimension}) NOT NULL,
                     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -109,6 +111,7 @@ class PgVectorStore:
             cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS review_state TEXT DEFAULT 'accepted'")
             cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS embedding_model TEXT DEFAULT ''")
             cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS embedding_revision TEXT DEFAULT ''")
+            cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS embedding_fingerprint TEXT DEFAULT ''")
             cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS embedding_dimension INTEGER")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_biolab_parser_chunks_project ON biolab_parser_chunks(project_id)")
         self.conn.commit()
@@ -167,8 +170,8 @@ class PgVectorStore:
                     """INSERT INTO biolab_parser_chunks
                        (chunk_id, project_id, document_id, parser_run_id, block_id, page_number,
                        section_name, block_type, chunk_text, metadata_json, content_hash, review_state,
-                        embedding_model, embedding_revision, embedding_dimension, embedding)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)
+                        embedding_model, embedding_revision, embedding_fingerprint, embedding_dimension, embedding)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)
                        ON CONFLICT (chunk_id) DO UPDATE SET
                          project_id=excluded.project_id, document_id=excluded.document_id,
                          parser_run_id=excluded.parser_run_id, page_number=excluded.page_number,
@@ -176,11 +179,12 @@ class PgVectorStore:
                          chunk_text=excluded.chunk_text, metadata_json=excluded.metadata_json, content_hash=excluded.content_hash,
                          review_state=excluded.review_state, embedding_model=excluded.embedding_model,
                          embedding_revision=excluded.embedding_revision,
+                         embedding_fingerprint=excluded.embedding_fingerprint,
                          embedding_dimension=excluded.embedding_dimension, embedding=excluded.embedding""",
                     (block["block_id"], project_id, document_id, parser_run_id, block["block_id"],
                      block["page_number"], block.get("section_name", "unknown"), block["block_type"],
                      block["text"], json.dumps(block.get("metadata", {}), sort_keys=True), content_hash, "accepted", self.embedding_model,
-                     self.embedding_revision, self.dimension, str(vector)),
+                     self.embedding_revision, self.embedding_fingerprint, self.dimension, str(vector)),
                 )
         self.conn.commit()
         return len(texts)
@@ -205,7 +209,7 @@ class PgVectorStore:
         self.ensure_schema()
         with self.conn.cursor() as cur:
             section_filter = ""
-            params: list[Any] = [str(embedding), project_id]
+            params: list[Any] = [str(embedding), project_id, self.embedding_fingerprint]
             if sections:
                 section_filter = " AND section_name = ANY(%s)"
                 params.append(sections)
@@ -214,10 +218,10 @@ class PgVectorStore:
                 f"""SELECT chunk_id, project_id, document_id, parser_run_id, block_id,
                           page_number, section_name, block_type, chunk_text, content_hash,
                           metadata_json,
-                          embedding_model, embedding_revision, embedding_dimension,
+                          embedding_model, embedding_revision, embedding_fingerprint, embedding_dimension,
                           1 - (embedding <=> %s::vector) AS similarity
                    FROM biolab_parser_chunks
-                   WHERE project_id = %s AND review_state = 'accepted'{section_filter}
+                   WHERE project_id = %s AND embedding_fingerprint = %s AND review_state = 'accepted'{section_filter}
                    ORDER BY embedding <=> %s::vector LIMIT %s""",
                 params,
             )
@@ -313,6 +317,7 @@ def search_parser_context(project_id: str, question: str, top_k: int = 8, sectio
         "embedding_provider": embedding_client.provider(),
         "embedding_model": embedding_client.model_name(),
         "embedding_dimension": embedding_client.dimension(),
+        "embedding_fingerprint": embedding_client.fingerprint(),
         "chunks": chunks,
     }
 

@@ -49,3 +49,11 @@ def test_empty_embedding_batch_is_a_noop(monkeypatch):
     monkeypatch.setenv("BIOLAB_EMBEDDING_PROVIDER", "free")
 
     assert embedding_client.embed([]) == []
+
+
+def test_embedding_fingerprint_changes_when_model_contract_changes(monkeypatch):
+    monkeypatch.setenv("BIOLAB_EMBEDDING_PROVIDER", "free")
+    first = embedding_client.fingerprint()
+    monkeypatch.setenv("BIOLAB_EMBEDDING_REVISION", "revision-2")
+
+    assert embedding_client.fingerprint() != first
