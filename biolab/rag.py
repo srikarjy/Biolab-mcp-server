@@ -13,9 +13,9 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from biolab import embedding_client
 
 
-def query_key(question: str, top_k: int, sections: list[str] | None = None, mode: str = "search", corpus_fingerprint: str = "", embedding_fingerprint: str | None = None) -> str:
+def query_key(question: str, top_k: int, sections: list[str] | None = None, mode: str = "search", corpus_fingerprint: str = "", embedding_fingerprint: str | None = None, context_fingerprint: str = "") -> str:
     """Return a stable cache key for one project-scoped RAG operation."""
-    payload = {"mode": mode, "question": question.casefold().strip(), "top_k": top_k, "sections": sections or [], "corpus": corpus_fingerprint, "embedding": embedding_fingerprint or embedding_client.fingerprint(), "algorithm": "project-rag-v2"}
+    payload = {"mode": mode, "question": question.casefold().strip(), "top_k": top_k, "sections": sections or [], "corpus": corpus_fingerprint, "context": context_fingerprint, "embedding": embedding_fingerprint or embedding_client.fingerprint(), "algorithm": "project-rag-v2"}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 

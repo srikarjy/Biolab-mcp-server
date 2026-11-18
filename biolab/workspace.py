@@ -21,7 +21,7 @@ def _organization_id(owner_id: str) -> str:
     return "org_" + hashlib.sha256(owner_id.encode("utf-8")).hexdigest()[:24]
 
 
-def create_project(conn: Any, name: str, description: str = "", owner_id: str = "local") -> dict:
+def create_project(conn: Any, name: str, description: str = "", owner_id: str = "local", objective: str = "", research_question: str = "", scope: str = "") -> dict:
     if not name.strip():
         raise ValueError("project name must not be empty")
     project = {
@@ -31,6 +31,9 @@ def create_project(conn: Any, name: str, description: str = "", owner_id: str = 
         "created_at": _now(),
         "owner_id": owner_id,
         "organization_id": _organization_id(owner_id),
+        "objective": objective.strip(),
+        "research_question": research_question.strip(),
+        "scope": scope.strip(),
     }
     organization_id = project["organization_id"]
     conn.execute(
@@ -42,7 +45,7 @@ def create_project(conn: Any, name: str, description: str = "", owner_id: str = 
         (organization_id, owner_id, "owner", project["created_at"]),
     )
     conn.execute(
-        "INSERT INTO projects (project_id, name, description, created_at, owner_id, organization_id) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO projects (project_id, name, description, created_at, owner_id, organization_id, objective, research_question, scope) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         tuple(project.values()),
     )
     audit.record(conn, project["project_id"], "project_created", "project", project["project_id"], owner_id, {"name": project["name"]})
@@ -54,11 +57,11 @@ def list_projects(conn: Any, owner_id: str | None = None) -> list[dict]:
     where = "WHERE owner_id = ?" if owner_id else ""
     params = (owner_id,) if owner_id else ()
     rows = conn.execute(
-        f"SELECT project_id, name, description, created_at, owner_id, organization_id FROM projects {where} ORDER BY created_at DESC",
+        f"SELECT project_id, name, description, created_at, owner_id, organization_id, objective, research_question, scope FROM projects {where} ORDER BY created_at DESC",
         params,
     ).fetchall()
     return [
-        {"project_id": row[0], "name": row[1], "description": row[2], "created_at": row[3], "owner_id": row[4], "organization_id": row[5]}
+        {"project_id": row[0], "name": row[1], "description": row[2], "created_at": row[3], "owner_id": row[4], "organization_id": row[5], "objective": row[6], "research_question": row[7], "scope": row[8]}
         for row in rows
     ]
 
@@ -75,6 +78,42 @@ def has_project_access(conn: Any, project_id: str, owner_id: str) -> bool:
         "SELECT 1 FROM organization_members WHERE organization_id = ? AND member_id = ?",
         (row[1], owner_id),
     ).fetchone() is not None
+
+
+def get_project_context(conn: Any, project_id: str, owner_id: str) -> dict[str, str] | None:
+    if not has_project_access(conn, project_id, owner_id):
+        return None
+    row = conn.execute("SELECT objective, research_question, scope FROM projects WHERE project_id = ?", (project_id,)).fetchone()
+    return {"objective": row[0], "research_question": row[1], "scope": row[2]} if row else None
+
+
+def update_project_context(conn: Any, project_id: str, owner_id: str, objective: str, research_question: str, scope: str) -> dict[str, str]:
+    if not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
+    context = {"objective": objective.strip(), "research_question": research_question.strip(), "scope": scope.strip()}
+    conn.execute("UPDATE projects SET objective = ?, research_question = ?, scope = ? WHERE project_id = ?", (*context.values(), project_id))
+    audit.record(conn, project_id, "project_context_updated", "project", project_id, owner_id, context)
+    conn.commit()
+    return context
+
+
+def project_context_fingerprint(conn: Any, project_id: str) -> str:
+    row = conn.execute("SELECT objective, research_question, scope FROM projects WHERE project_id = ?", (project_id,)).fetchone()
+    payload = {"objective": row[0], "research_question": row[1], "scope": row[2]} if row else {}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def record_query(conn: Any, project_id: str, question: str, mode: str, cache_hit: bool, result_status: str, created_by: str) -> dict[str, Any]:
+    query = {"query_id": str(uuid.uuid4()), "project_id": project_id, "question": question.strip(), "mode": mode, "cache_hit": bool(cache_hit), "result_status": result_status, "created_by": created_by, "created_at": _now()}
+    conn.execute("INSERT INTO project_query_history (query_id, project_id, question, mode, cache_hit, result_status, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)", tuple(query.values()))
+    return query
+
+
+def list_query_history(conn: Any, project_id: str, owner_id: str, limit: int = 50) -> list[dict[str, Any]]:
+    if not has_project_access(conn, project_id, owner_id):
+        raise ValueError("project access denied")
+    rows = conn.execute("SELECT query_id, question, mode, cache_hit, result_status, created_by, created_at FROM project_query_history WHERE project_id = ? ORDER BY created_at DESC LIMIT ?", (project_id, min(max(limit, 1), 100))).fetchall()
+    return [{"query_id": row[0], "question": row[1], "mode": row[2], "cache_hit": bool(row[3]), "result_status": row[4], "created_by": row[5], "created_at": row[6]} for row in rows]
 
 
 def create_collection(conn: Any, project_id: str, name: str, description: str = "", owner_id: str | None = None) -> dict:
@@ -578,7 +617,7 @@ def get_project_report(conn: Any, project_id: str, owner_id: str | None = None) 
     if owner_id is not None and not has_project_access(conn, project_id, owner_id):
         return None
     project_row = conn.execute(
-        "SELECT project_id, name, description, created_at, owner_id, organization_id FROM projects WHERE project_id = ?",
+        "SELECT project_id, name, description, created_at, owner_id, organization_id, objective, research_question, scope FROM projects WHERE project_id = ?",
         (project_id,),
     ).fetchone()
     if project_row is None:
@@ -606,6 +645,7 @@ def get_project_report(conn: Any, project_id: str, owner_id: str | None = None) 
             "project_id": project_row[0], "name": project_row[1],
             "description": project_row[2], "created_at": project_row[3],
             "owner_id": project_row[4], "organization_id": project_row[5],
+            "objective": project_row[6], "research_question": project_row[7], "scope": project_row[8],
         },
         "collections": [get_collection(conn, row[0]) for row in collection_ids],
         "papers": list_project_retrievals(conn, project_id, project_row[4]),

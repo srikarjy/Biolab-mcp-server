@@ -65,6 +65,8 @@ OPENAPI_SCHEMA = {
         "/v1/projects/{project_id}/rag/search": {"post": {"summary": "Search project-scoped parsed RAG chunks"}},
         "/v1/projects/{project_id}/rag/answer": {"post": {"summary": "Return an extractive answer grounded in project RAG chunks"}},
         "/v1/projects/{project_id}/rag/notes": {"get": {"summary": "List saved project RAG notes"}, "post": {"summary": "Save an important RAG note"}},
+        "/v1/projects/{project_id}/context": {"get": {"summary": "Get project research context"}, "patch": {"summary": "Update project research context"}},
+        "/v1/projects/{project_id}/query-history": {"get": {"summary": "List project-scoped RAG query history"}},
         "/v1/parser/runs/{parser_run_id}": {"get": {"summary": "Inspect parsed document blocks"}},
         "/v1/parser/runs/{parser_run_id}/rebuild-index": {"post": {"summary": "Rebuild project RAG vectors from accepted blocks"}},
         "/v1/parser/runs/{parser_run_id}/blocks/{block_id}/review": {"post": {"summary": "Accept or exclude a parsed block for RAG"}},
@@ -114,7 +116,7 @@ PROJECT_PAGE_HTML = r"""<!doctype html>
 </head>
 <body><main class="shell">
   <nav class="top"><span class="brand">biolab / project workspace</span><a class="back" href="/">← Evidence search</a></nav>
-  <header><p class="eyebrow">Project workspace · Step 02</p><h1 id="title">Loading project…</h1><p class="lede" id="description">Loading the selected project and its preserved evidence.</p></header>
+  <header><p class="eyebrow">Project workspace · Step 02</p><h1 id="title">Loading project…</h1><p class="lede" id="description">Loading the selected project and its preserved evidence.</p><div id="context" class="meta"></div></header>
   <div class="grid">
     <section class="panel"><h2>Selected MCP papers</h2><p class="sub">These are preserved retrievals selected from the evidence search page. Parsing uses the saved record; there is no upload step.</p><div id="papers" class="list"><div class="empty">Loading selected papers…</div></div></section>
   <section class="panel"><h2>Query the paper RAG</h2><p class="sub">Answers use only reviewed parser blocks and show their citations.</p><form id="query-form" class="query"><input id="question" required placeholder="What does this paper report about KRAS?"><button>Ask grounded question</button></form><div id="rag" class="list"><div class="empty">Ask a question after indexing reviewed blocks.</div></div><div id="notes" class="list"></div></section>
@@ -127,7 +129,7 @@ const $=id=>document.getElementById(id);
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||('Request failed '+r.status));return d}
 async function load(){
-  try{const report=await api('/v1/projects/'+encodeURIComponent(projectId)+'/report');const p=report.project||{};$('title').textContent=p.name||'Project workspace';$('description').textContent=p.description||'Selected scientific evidence, parser review, and paper-grounded retrieval.';await Promise.all([papers(),runs(),notes()]);}
+  try{const report=await api('/v1/projects/'+encodeURIComponent(projectId)+'/report');const p=report.project||{};$('title').textContent=p.name||'Project workspace';$('description').textContent=p.description||'Selected scientific evidence, parser review, and paper-grounded retrieval.';const c=await api('/v1/projects/'+encodeURIComponent(projectId)+'/context');$('context').textContent=[c.objective&&'Objective: '+c.objective,c.research_question&&'Question: '+c.research_question,c.scope&&'Scope: '+c.scope].filter(Boolean).join(' · ')||'No research context saved yet.';await Promise.all([papers(),runs(),notes()]);}
   catch(e){$('description').innerHTML='<span class="error">'+esc(e.message)+'</span>'}
 }
 async function papers(){const d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/retrievals');const rows=d.retrievals||[];$('papers').innerHTML=rows.length?rows.map(x=>{const s=x.snapshot||{};return '<article class="item"><strong>'+esc(s.title||s.name||x.external_id)+'</strong><span class="meta">'+esc(x.source)+' · '+esc(x.external_id)+'</span><div class="actions"><button data-parse="'+esc(x.retrieval_id)+'">Parse saved paper</button></div></article>'}).join(''):'<div class="empty">No papers selected yet. Return to evidence search and select a preserved result.</div>'}
@@ -1010,7 +1012,8 @@ async def project_rag_search(request: Request) -> JSONResponse:
         question = str(payload.get("question", "")).strip()
         top_k = int(payload.get("top_k", 8))
         corpus_fingerprint = document_parser.project_corpus_fingerprint(request.app.state.conn, project_id)
-        question_key = rag.query_key(question, top_k, sections, "search", corpus_fingerprint)
+        context_fingerprint = workspace.project_context_fingerprint(request.app.state.conn, project_id)
+        question_key = rag.query_key(question, top_k, sections, "search", corpus_fingerprint, context_fingerprint=context_fingerprint)
         cached = request.app.state.conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key)).fetchone()
         if cached:
             result = json.loads(cached[0])
@@ -1021,6 +1024,7 @@ async def project_rag_search(request: Request) -> JSONResponse:
             if result.get("status") == "active":
                 request.app.state.conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, question_key, question, json.dumps(result), result.get("embedding_model", rag.embedding_client.model_name()),))
         audit.record(request.app.state.conn, project_id, "rag_queried", "project", project_id, auth.request_identity(request), {"question": question, "status": result.get("status", ""), "cached": bool(cached)})
+        workspace.record_query(request.app.state.conn, project_id, question, "search", bool(cached), result.get("status", ""), auth.request_identity(request))
         request.app.state.conn.commit()
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1042,7 +1046,8 @@ async def project_rag_answer(request: Request) -> JSONResponse:
         question = str(payload.get("question", "")).strip()
         top_k = int(payload.get("top_k", 8))
         corpus_fingerprint = document_parser.project_corpus_fingerprint(request.app.state.conn, project_id)
-        question_key = rag.query_key(question, top_k, sections, "answer", corpus_fingerprint)
+        context_fingerprint = workspace.project_context_fingerprint(request.app.state.conn, project_id)
+        question_key = rag.query_key(question, top_k, sections, "answer", corpus_fingerprint, context_fingerprint=context_fingerprint)
         cached = request.app.state.conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key)).fetchone()
         if cached:
             result = json.loads(cached[0])
@@ -1060,6 +1065,7 @@ async def project_rag_answer(request: Request) -> JSONResponse:
         else:
             result["cached"] = True
         audit.record(request.app.state.conn, project_id, "rag_answered", "project", project_id, owner_id, {"question": question, "grounded": result.get("grounded", False), "cached": bool(cached)})
+        workspace.record_query(request.app.state.conn, project_id, question, "answer", bool(cached), result.get("status", ""), owner_id)
         request.app.state.conn.commit()
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1152,6 +1158,30 @@ async def project_audit(request: Request) -> JSONResponse:
     return JSONResponse({"project_id": project_id, "valid": valid, "event_count": len(events), "first_broken_event_id": broken_id, "events": events}, status_code=200 if valid else 409)
 
 
+async def project_context(request: Request) -> JSONResponse:
+    project_id = request.path_params["project_id"]
+    owner_id = auth.request_identity(request)
+    try:
+        if request.method == "GET":
+            context = workspace.get_project_context(request.app.state.conn, project_id, owner_id)
+            if context is None:
+                return JSONResponse({"error": "project not found"}, status_code=404)
+            return JSONResponse(context)
+        payload = await request.json()
+        context = workspace.update_project_context(request.app.state.conn, project_id, owner_id, str(payload.get("objective", "")), str(payload.get("research_question", "")), str(payload.get("scope", "")))
+        return JSONResponse(context)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def project_query_history(request: Request) -> JSONResponse:
+    try:
+        history = workspace.list_query_history(request.app.state.conn, request.path_params["project_id"], auth.request_identity(request))
+    except ValueError:
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    return JSONResponse({"queries": history})
+
+
 async def projects(request: Request) -> JSONResponse:
     owner_id = auth.bind_agent_id("anonymous", request)
     if request.method == "GET":
@@ -1159,7 +1189,8 @@ async def projects(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
         project = workspace.create_project(
-            request.app.state.conn, str(payload.get("name", "")), str(payload.get("description", "")), owner_id
+            request.app.state.conn, str(payload.get("name", "")), str(payload.get("description", "")), owner_id,
+            str(payload.get("objective", "")), str(payload.get("research_question", "")), str(payload.get("scope", ""))
         )
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1415,6 +1446,8 @@ def api_routes() -> list[Route]:
         Route("/v1/projects", projects, methods=["GET", "POST"]),
         Route("/v1/projects/{project_id}/report", project_report),
         Route("/v1/projects/{project_id}/audit", project_audit),
+        Route("/v1/projects/{project_id}/context", project_context, methods=["GET", "PATCH"]),
+        Route("/v1/projects/{project_id}/query-history", project_query_history),
         Route("/v1/projects/{project_id}/save-reviewed", save_reviewed_project_evidence, methods=["POST"]),
         Route("/v1/collections", collections, methods=["GET", "POST"]),
         Route("/v1/collections/{collection_id}", collection_detail),

@@ -64,7 +64,10 @@ CREATE TABLE IF NOT EXISTS projects (
     description  TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL,
     owner_id     TEXT NOT NULL DEFAULT 'local',
-    organization_id TEXT
+    organization_id TEXT,
+    objective TEXT NOT NULL DEFAULT '',
+    research_question TEXT NOT NULL DEFAULT '',
+    scope TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS audit_events (
@@ -284,6 +287,13 @@ CREATE TABLE IF NOT EXISTS project_notes (
     note_text TEXT NOT NULL, citations TEXT NOT NULL DEFAULT '[]', created_by TEXT NOT NULL, created_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(project_id)
 );
+CREATE TABLE IF NOT EXISTS project_query_history (
+    query_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, question TEXT NOT NULL,
+    mode TEXT NOT NULL, cache_hit INTEGER NOT NULL DEFAULT 0, result_status TEXT NOT NULL,
+    created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_query_history_project ON project_query_history(project_id, created_at);
 CREATE TABLE IF NOT EXISTS parsed_blocks (
     block_id TEXT PRIMARY KEY, parser_run_id TEXT NOT NULL, page_number INTEGER NOT NULL,
     block_index INTEGER NOT NULL, block_type TEXT NOT NULL, section_name TEXT NOT NULL DEFAULT 'unknown',
@@ -373,6 +383,9 @@ def _upgrade_projects(conn: Any) -> None:
         conn.execute("ALTER TABLE projects ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'local'")
     if "organization_id" not in columns:
         conn.execute("ALTER TABLE projects ADD COLUMN organization_id TEXT")
+    for name in ("objective", "research_question", "scope"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE projects ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
 
 
 def _upgrade_citations(conn: Any) -> None:
