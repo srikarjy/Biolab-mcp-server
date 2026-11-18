@@ -288,7 +288,7 @@ CREATE TABLE IF NOT EXISTS parsed_blocks (
     block_id TEXT PRIMARY KEY, parser_run_id TEXT NOT NULL, page_number INTEGER NOT NULL,
     block_index INTEGER NOT NULL, block_type TEXT NOT NULL, section_name TEXT NOT NULL DEFAULT 'unknown',
     text TEXT NOT NULL, review_state TEXT NOT NULL DEFAULT 'pending', review_note TEXT NOT NULL DEFAULT '',
-    bbox TEXT, content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+    bbox TEXT, metadata TEXT NOT NULL DEFAULT '{}', content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
     FOREIGN KEY (parser_run_id) REFERENCES parser_runs(parser_run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_parsed_blocks_run ON parsed_blocks(parser_run_id, page_number, block_index);
@@ -370,6 +370,8 @@ def _upgrade_parser_runs(conn: Any) -> None:
         conn.execute("ALTER TABLE parsed_blocks ADD COLUMN review_state TEXT NOT NULL DEFAULT 'pending'")
     if "review_note" not in block_columns:
         conn.execute("ALTER TABLE parsed_blocks ADD COLUMN review_note TEXT NOT NULL DEFAULT ''")
+    if "metadata" not in block_columns:
+        conn.execute("ALTER TABLE parsed_blocks ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_parser_runs_project ON parser_runs(project_id, created_at)")
 
 

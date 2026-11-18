@@ -64,6 +64,24 @@ def test_parser_run_persists_page_aware_blocks_and_flushes(monkeypatch, tmp_path
     assert document_parser.get_parser_run(conn, run["parser_run_id"])["blocks"][0]["text"] == "KRAS evidence"
 
 
+def test_parser_run_preserves_typed_layout_metadata(monkeypatch, tmp_path):
+    conn = db.connect(str(tmp_path / "layout.db"))
+    monkeypatch.setattr(hf_parser, "parse_document", lambda content, filename: {
+        "parser_model": "layout-parser", "status": "succeeded", "source_hash": "abc", "block_count": 1,
+        "blocks": [{
+            "block_id": "table-1", "page_number": 4, "block_index": 0, "block_type": "table",
+            "text": "Group | Response\nA | 4", "bbox": [1, 2, 3, 4],
+            "metadata": {"caption": "Table 1. Response", "table_id": "table-1"},
+        }],
+    })
+
+    run = document_parser.create_parser_run(conn, b"table", "paper.pdf", "scientist")
+    block = document_parser.get_parser_run(conn, run["parser_run_id"])["blocks"][0]
+
+    assert block["block_type"] == "table"
+    assert block["metadata"] == {"caption": "Table 1. Response", "table_id": "table-1"}
+
+
 def test_accepted_unassigned_block_is_not_written_to_project_rag(monkeypatch, tmp_path):
     conn = db.connect(str(tmp_path / "unassigned.db"))
     monkeypatch.setattr(hf_parser, "parse_document", lambda content, filename: {

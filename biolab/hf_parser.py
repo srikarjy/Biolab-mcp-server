@@ -64,10 +64,14 @@ def _normalize(raw: Any) -> list[dict[str, Any]]:
             if not text:
                 continue
             block_type = str(block.get("type") or block.get("label") or "text")
+            metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+            for key in ("caption", "table_id", "figure_id", "rows", "columns"):
+                if key in block and key not in metadata:
+                    metadata[key] = block[key]
             blocks.append({
                 "block_id": _stable_block_id(page_number, block_index, block_type, text), "page_number": page_number,
                 "block_index": block_index, "block_type": str(block.get("type") or block.get("label") or "text"),
-                "text": text, "bbox": block.get("bbox") or block.get("box"),
+                "text": text, "bbox": block.get("bbox") or block.get("box"), "metadata": metadata,
             })
     return blocks
 
@@ -155,7 +159,7 @@ def fallback_text_blocks(text: str) -> list[dict[str, Any]]:
                     "block_index": page_index,
                     "block_type": "text",
                     "text": piece,
-                    "bbox": None,
+                    "bbox": None, "metadata": {},
                 })
                 page_index += 1
     return chunks

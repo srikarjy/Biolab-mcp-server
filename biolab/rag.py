@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import uuid
@@ -56,6 +57,7 @@ class PgVectorStore:
                     document_id TEXT NOT NULL, parser_run_id TEXT NOT NULL,
                     block_id TEXT NOT NULL, page_number INTEGER NOT NULL,
                     section_name TEXT NOT NULL, block_type TEXT NOT NULL, chunk_text TEXT NOT NULL,
+                    metadata_json TEXT NOT NULL DEFAULT '{{}}',
                     content_hash TEXT NOT NULL, review_state TEXT NOT NULL DEFAULT 'accepted',
                     embedding_model TEXT NOT NULL, embedding_revision TEXT NOT NULL,
                     embedding_dimension INTEGER NOT NULL,
@@ -66,6 +68,7 @@ class PgVectorStore:
             cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS project_id TEXT")
             cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS document_id TEXT")
             cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS section_name TEXT DEFAULT 'unknown'")
+            cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS metadata_json TEXT DEFAULT '{}'")
             cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS content_hash TEXT DEFAULT ''")
             cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS review_state TEXT DEFAULT 'accepted'")
             cur.execute("ALTER TABLE biolab_parser_chunks ADD COLUMN IF NOT EXISTS embedding_model TEXT DEFAULT ''")
@@ -127,20 +130,20 @@ class PgVectorStore:
                 cur.execute(
                     """INSERT INTO biolab_parser_chunks
                        (chunk_id, project_id, document_id, parser_run_id, block_id, page_number,
-                        section_name, block_type, chunk_text, content_hash, review_state,
+                       section_name, block_type, chunk_text, metadata_json, content_hash, review_state,
                         embedding_model, embedding_revision, embedding_dimension, embedding)
-                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)
+                       VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::vector)
                        ON CONFLICT (chunk_id) DO UPDATE SET
                          project_id=excluded.project_id, document_id=excluded.document_id,
                          parser_run_id=excluded.parser_run_id, page_number=excluded.page_number,
                          section_name=excluded.section_name, block_type=excluded.block_type,
-                         chunk_text=excluded.chunk_text, content_hash=excluded.content_hash,
+                         chunk_text=excluded.chunk_text, metadata_json=excluded.metadata_json, content_hash=excluded.content_hash,
                          review_state=excluded.review_state, embedding_model=excluded.embedding_model,
                          embedding_revision=excluded.embedding_revision,
                          embedding_dimension=excluded.embedding_dimension, embedding=excluded.embedding""",
                     (block["block_id"], project_id, document_id, parser_run_id, block["block_id"],
                      block["page_number"], block.get("section_name", "unknown"), block["block_type"],
-                     block["text"], content_hash, "accepted", self.embedding_model,
+                     block["text"], json.dumps(block.get("metadata", {}), sort_keys=True), content_hash, "accepted", self.embedding_model,
                      self.embedding_revision, self.dimension, str(vector)),
                 )
         self.conn.commit()
@@ -174,6 +177,7 @@ class PgVectorStore:
             cur.execute(
                 f"""SELECT chunk_id, project_id, document_id, parser_run_id, block_id,
                           page_number, section_name, block_type, chunk_text, content_hash,
+                          metadata_json,
                           embedding_model, embedding_revision, embedding_dimension,
                           1 - (embedding <=> %s::vector) AS similarity
                    FROM biolab_parser_chunks
