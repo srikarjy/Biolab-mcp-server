@@ -13,6 +13,7 @@ def test_dashboard_and_health(tmp_path):
         health = client.get("/health")
         schema = client.get("/openapi.json")
         metrics = client.get("/metrics")
+        storage = client.get("/v1/storage")
 
     assert page.status_code == 200
     assert "Biolab Evidence Workspace" in page.text
@@ -20,6 +21,8 @@ def test_dashboard_and_health(tmp_path):
     assert schema.json()["info"]["version"] == "0.4.1"
     assert metrics.json()["audit_chain_valid"] is True
     assert metrics.json()["counts"]["retrievals"] == 0
+    assert storage.json()["metadata"]["backend"] == "sqlite"
+    assert storage.json()["metadata"]["durable"] is False
 
 
 def test_huggingface_parser_api_persists_and_flushes(monkeypatch, tmp_path):

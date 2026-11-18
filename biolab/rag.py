@@ -19,6 +19,16 @@ def query_key(question: str, top_k: int, sections: list[str] | None = None, mode
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
+def storage_status() -> dict[str, Any]:
+    configured = bool(os.environ.get("DATABASE_URL") or os.environ.get("PGVECTOR_DATABASE_URL"))
+    return {
+        "backend": "neon-pgvector" if configured else "not-configured",
+        "durable": configured,
+        "scope": "accepted parser chunks and embeddings",
+        "warning": "Configure PGVECTOR_DATABASE_URL for durable vector storage." if not configured else "",
+    }
+
+
 def _normalize_dsn(dsn: str | None) -> str | None:
     """Remove connection options unsupported by older local libpq builds."""
     if not dsn or not dsn.startswith(("postgres://", "postgresql://")):

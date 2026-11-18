@@ -371,6 +371,13 @@ def get_project_audit(project_id: str, ctx: Context) -> dict:
     return {"project_id": project_id, "valid": valid, "first_broken_event_id": broken_id, "events": audit.list_events(_conn, project_id)}
 
 
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_storage_status(ctx: Context) -> dict:
+    """Report whether project metadata and RAG vectors are durably configured."""
+    _bound("mcp:user", ctx)
+    return {"metadata": db.storage_status(), "vectors": rag.storage_status()}
+
+
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
 def create_evidence_collection(project_id: str, name: str, ctx: Context, description: str = "") -> dict:
     """Create a reviewed evidence collection in a project."""

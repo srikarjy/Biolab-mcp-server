@@ -314,6 +314,17 @@ def current_target() -> str | None:
     return _current_target
 
 
+def storage_status() -> dict[str, Any]:
+    """Describe metadata durability without exposing database credentials."""
+    remote = bool(os.environ.get("TURSO_DATABASE_URL"))
+    return {
+        "backend": "turso-libsql" if remote else "sqlite",
+        "durable": remote,
+        "scope": "project metadata, audit history, parser records, and query cache",
+        "warning": "Configure TURSO_DATABASE_URL and TURSO_AUTH_TOKEN for durable deployment metadata." if not remote else "",
+    }
+
+
 def open_connection(target: str, token: str | None = None) -> Any:
     """Open a local SQLite connection or an optional remote libSQL connection."""
     if token or target.startswith(("libsql://", "https://")):

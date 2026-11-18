@@ -50,6 +50,7 @@ OPENAPI_SCHEMA = {
     "paths": {
         "/health": {"get": {"summary": "Health check"}},
         "/metrics": {"get": {"summary": "Local service counters and chain status"}},
+        "/v1/storage": {"get": {"summary": "Report metadata and vector storage durability"}},
         "/v1/evidence/search": {"post": {"summary": "Search and preserve evidence"}},
         "/v1/rankings": {"post": {"summary": "Rank preserved retrievals with explanations"}},
         "/v1/rankings/{ranking_run_id}": {"get": {"summary": "Get a ranking run"}},
@@ -782,6 +783,10 @@ async def health(request: Request) -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "biolab"})
 
 
+async def storage(request: Request) -> JSONResponse:
+    return JSONResponse({"metadata": db.storage_status(), "vectors": rag.storage_status()})
+
+
 async def openapi(_request: Request) -> JSONResponse:
     return JSONResponse(OPENAPI_SCHEMA)
 
@@ -1372,6 +1377,7 @@ def api_routes() -> list[Route]:
         Route("/", dashboard),
         Route("/projects/{project_id}", project_page),
         Route("/health", health),
+        Route("/v1/storage", storage),
         Route("/openapi.json", openapi),
         Route("/metrics", metrics),
         Route("/v1/evidence/search", search, methods=["POST"]),
