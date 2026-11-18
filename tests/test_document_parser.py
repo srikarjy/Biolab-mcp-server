@@ -47,6 +47,24 @@ def test_normalized_parser_blocks_have_stable_ids():
     assert first[0]["block_id"].startswith("chunk-")
 
 
+def test_normalize_serializes_table_fields_and_figure_neighbors():
+    raw = {
+        "pages": [{"page": 2, "blocks": [
+            {"type": "paragraph", "text": "The groups differed."},
+            {"type": "figure_caption", "text": "Figure 1", "figure_id": "fig-1", "caption": "Study design"},
+            {"type": "table", "text": "Table 1", "table_id": "tab-1", "caption": "Response", "columns": ["Group", "Response"], "rows": [["A", "4"]]},
+        ]}],
+    }
+
+    blocks = hf_parser._normalize(raw)
+
+    assert "Headers: Group | Response" in blocks[2]["text"]
+    assert "Rows: A | 4" in blocks[2]["text"]
+    assert blocks[2]["metadata"]["table_serialization_hash"]
+    assert blocks[1]["metadata"]["associated_block_ids"] == [blocks[0]["block_id"]]
+    assert blocks[1]["metadata"]["serialization_version"] == "layout-block-v1"
+
+
 def test_parser_run_persists_page_aware_blocks_and_flushes(monkeypatch, tmp_path):
     conn = db.connect(str(tmp_path / "parser.db"))
     monkeypatch.setattr(hf_parser, "parse_document", lambda content, filename: {

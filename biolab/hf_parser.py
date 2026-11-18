@@ -40,11 +40,27 @@ def _stable_block_id(page_number: int, block_index: int, block_type: str, text: 
     return f"chunk-{digest}"
 
 
+def _structured_block_text(block: dict[str, Any], block_type: str, text: str, metadata: dict[str, Any]) -> str:
+    """Make table/figure meaning searchable without discarding layout fields."""
+    if "table" in block_type.lower():
+        parts = [text]
+        if metadata.get("caption") and str(metadata["caption"]) not in text:
+            parts.append(f"Caption: {metadata['caption']}")
+        if metadata.get("columns"):
+            parts.append("Headers: " + " | ".join(map(str, metadata["columns"])))
+        if metadata.get("rows"):
+            parts.append("Rows: " + " ; ".join(" | ".join(map(str, row)) if isinstance(row, list | tuple) else str(row) for row in metadata["rows"]))
+        return _clean_text(" ".join(parts))
+    if "figure" in block_type.lower() and metadata.get("caption") and str(metadata["caption"]) not in text:
+        return _clean_text(f"{text} Caption: {metadata['caption']}")
+    return text
+
+
 def configured() -> bool:
     return bool(os.environ.get("HF_PARSER_ENDPOINT") and os.environ.get("HF_TOKEN"))
 
 
-def _normalize(raw: Any) -> list[dict[str, Any]]:
+def _normalize(raw: Any) -> list[dict[str, Any]]:  # noqa: PLR0912
     """Normalize common HF parser responses into page-aware evidence blocks."""
     pages = raw.get("pages", []) if isinstance(raw, dict) else raw if isinstance(raw, list) else [{"text": str(raw)}]
     blocks: list[dict[str, Any]] = []
@@ -64,15 +80,30 @@ def _normalize(raw: Any) -> list[dict[str, Any]]:
             if not text:
                 continue
             block_type = str(block.get("type") or block.get("label") or "text")
-            metadata = block.get("metadata") if isinstance(block.get("metadata"), dict) else {}
+            metadata = dict(block.get("metadata") if isinstance(block.get("metadata"), dict) else {})
             for key in ("caption", "table_id", "figure_id", "rows", "columns"):
                 if key in block and key not in metadata:
                     metadata[key] = block[key]
+            block_type = str(block.get("type") or block.get("label") or "text")
+            text = _structured_block_text(block, block_type, text, metadata)
+            metadata["serialization_version"] = "layout-block-v1"
+            if "table" in block_type.lower():
+                metadata["table_serialization_hash"] = hashlib.sha256(json.dumps({"caption": metadata.get("caption"), "columns": metadata.get("columns"), "rows": metadata.get("rows"), "text": text}, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             blocks.append({
                 "block_id": _stable_block_id(page_number, block_index, block_type, text), "page_number": page_number,
                 "block_index": block_index, "block_type": str(block.get("type") or block.get("label") or "text"),
                 "text": text, "bbox": block.get("bbox") or block.get("box"), "metadata": metadata,
             })
+    for index, block in enumerate(blocks):
+        if "figure" not in block["block_type"].lower():
+            continue
+        neighbors = []
+        for neighbor_index in (index - 1, index + 1):
+            if 0 <= neighbor_index < len(blocks):
+                neighbor = blocks[neighbor_index]
+                if neighbor["page_number"] == block["page_number"] and "figure" not in neighbor["block_type"].lower() and "table" not in neighbor["block_type"].lower():
+                    neighbors.append(neighbor["block_id"])
+        block["metadata"]["associated_block_ids"] = neighbors
     return blocks
 
 
