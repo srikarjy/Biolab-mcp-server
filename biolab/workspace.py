@@ -251,8 +251,14 @@ def get_collection(conn: Any, collection_id: str, owner_id: str | None = None) -
 def save_retrieval_to_project(conn: Any, project_id: str, retrieval_id: str, owner_id: str) -> dict:
     if not has_project_access(conn, project_id, owner_id):
         raise ValueError("project access denied")
-    if conn.execute("SELECT 1 FROM retrievals WHERE retrieval_id = ?", (retrieval_id,)).fetchone() is None:
+    retrieval = conn.execute("SELECT agent_id FROM retrievals WHERE retrieval_id = ?", (retrieval_id,)).fetchone()
+    if retrieval is None:
         raise ValueError("retrieval not found")
+    # Public/local demo mode historically permits shared retrievals. Once a
+    # caller is authenticated, an ID alone is not permission to attach another
+    # caller's preserved source record to a private project.
+    if owner_id != "anonymous" and retrieval[0] != owner_id:
+        raise ValueError("retrieval access denied")
     row = conn.execute(
         "SELECT collection_id FROM evidence_collections WHERE project_id = ? AND name = ?",
         (project_id, "Selected papers"),

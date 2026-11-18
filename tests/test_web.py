@@ -489,3 +489,21 @@ def test_authenticated_projects_are_isolated_by_owner(tmp_path):
     assert alice.status_code == 201
     assert bob_list.json()["projects"] == []
     assert bob_report.status_code == 404
+
+
+def test_authenticated_caller_cannot_attach_another_callers_retrieval(tmp_path):
+    app = create_app(tmp_path / "retrieval-ownership.db", require_auth=True)
+    with TestClient(app) as client:
+        auth.create_api_key(app.state.conn, "alice", "user:alice")
+        bob_key = auth.create_api_key(app.state.conn, "bob", "user:bob")
+        project = client.post("/v1/projects", headers={"Authorization": f"Bearer {bob_key}"}, json={"name": "Bob project"}).json()
+        record = retrieval_log.write_retrieval(
+            app.state.conn, "KRAS", "PMID-PRIVATE", "user:alice", "pubmed", {}, "raw", {"title": "Private paper"},
+        )
+        response = client.post(
+            f"/v1/projects/{project['project_id']}/retrievals",
+            headers={"Authorization": f"Bearer {bob_key}"},
+            json={"retrieval_id": record.retrieval_id},
+        )
+
+    assert response.status_code == 404
