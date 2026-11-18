@@ -33,29 +33,45 @@ def free_enabled() -> bool:
     return os.environ.get("BIOLAB_FREE_EMBEDDINGS", "").lower() in {"1", "true", "yes", "on"}
 
 
+def provider() -> str:
+    """Resolve one embedding provider with explicit configuration taking priority."""
+    explicit = os.environ.get("BIOLAB_EMBEDDING_PROVIDER", "").strip().lower()
+    if explicit in {"nvidia", "baidu", "local", "free", "custom"}:
+        return explicit
+    for name, enabled in (
+        ("local", local_enabled()), ("free", free_enabled()),
+        ("baidu", baidu_enabled()), ("nvidia", nvidia_enabled()),
+    ):
+        if enabled:
+            return name
+    custom = bool(os.environ.get("BIOLAB_EMBEDDING_API_KEY") and os.environ.get("BIOLAB_EMBEDDING_API_URL"))
+    return "custom" if custom else "none"
+
+
 def dimension() -> int:
     if os.environ.get("BIOLAB_EMBEDDING_DIMENSION"):
         return int(os.environ["BIOLAB_EMBEDDING_DIMENSION"])
-    if local_enabled() or free_enabled() or baidu_enabled():
+    if provider() in {"local", "free", "baidu"}:
         return 384
-    if nvidia_enabled():
+    if provider() == "nvidia":
         return int(os.environ.get("NVIDIA_EMBEDDING_DIMENSION", "2048"))
     return 1536
 
 
 def model_name() -> str:
-    if local_enabled():
+    selected = provider()
+    if selected == "local":
         return os.environ.get("BIOLAB_LOCAL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
-    if free_enabled():
+    if selected == "free":
         return "biolab-feature-hash-v1"
-    if baidu_enabled():
+    if selected == "baidu":
         return os.environ.get("BAIDU_QIANFAN_EMBEDDING_MODEL", "embedding-v1")
-    if nvidia_enabled():
+    if selected == "nvidia":
         return os.environ.get("NVIDIA_EMBEDDING_MODEL", "nvidia/nemotron-3.5-embed-1b")
     return os.environ.get("BIOLAB_EMBEDDING_MODEL", "text-embedding-3-small")
 
 def configured() -> bool:
-    return local_enabled() or free_enabled() or baidu_enabled() or nvidia_enabled() or bool(os.environ.get("BIOLAB_EMBEDDING_API_KEY") and os.environ.get("BIOLAB_EMBEDDING_API_URL"))
+    return provider() != "none"
 
 
 def _free_embed(texts: list[str]) -> list[list[float]]:
@@ -90,22 +106,25 @@ def _local_embed(texts: list[str]) -> list[list[float]]:
 
 
 def embed(texts: list[str]) -> list[list[float]]:
-    if local_enabled():
+    if not texts:
+        return []
+    selected = provider()
+    if selected == "local":
         return _local_embed(texts)
-    if free_enabled():
+    if selected == "free":
         return _free_embed(texts)
     if not configured():
         raise RuntimeError("configure local embeddings or BIOLAB_EMBEDDING_API_KEY and BIOLAB_EMBEDDING_API_URL for pgvector RAG")
-    default_endpoint = "https://qianfan.baidubce.com/v2/embeddings" if baidu_enabled() else "https://integrate.api.nvidia.com/v1/embeddings" if nvidia_enabled() else ""
+    default_endpoint = "https://qianfan.baidubce.com/v2/embeddings" if selected == "baidu" else "https://integrate.api.nvidia.com/v1/embeddings" if selected == "nvidia" else ""
     endpoint = os.environ.get("BIOLAB_EMBEDDING_API_URL", default_endpoint)
-    if baidu_enabled():
+    if selected == "baidu":
         api_key = os.environ.get("BAIDU_QIANFAN_API_KEY", "")
-    elif nvidia_enabled():
+    elif selected == "nvidia":
         api_key = os.environ.get("NVIDIA_API_KEY", "")
     else:
         api_key = os.environ["BIOLAB_EMBEDDING_API_KEY"]
     model = model_name()
-    batch_size = 16 if baidu_enabled() else len(texts)
+    batch_size = 16 if selected == "baidu" else len(texts)
     vectors: list[list[float]] = []
     for start in range(0, len(texts), batch_size):
         batch = texts[start:start + batch_size]
@@ -118,4 +137,8 @@ def embed(texts: list[str]) -> list[list[float]]:
         with request.urlopen(req, timeout=float(os.environ.get("BIOLAB_EMBEDDING_TIMEOUT_SECONDS", "30"))) as response:
             result = json.loads(response.read().decode())
         vectors.extend(item["embedding"] for item in sorted(result["data"], key=lambda item: item["index"]))
+    if len(vectors) != len(texts):
+        raise ValueError("embedding provider returned the wrong number of vectors")
+    if any(len(vector) != dimension() for vector in vectors):
+        raise ValueError(f"embedding provider returned vectors with dimension {dimension()}")
     return vectors

@@ -257,4 +257,10 @@ def search_parser_context(project_id: str, question: str, top_k: int = 8, sectio
     if not embedding_client.configured():
         return {"status": "disabled", "reason": "embedding provider not configured", "chunks": []}
     vector = embedding_client.embed([question])[0]
-    return {"status": "active", "sections": sections or [], "chunks": PgVectorStore().search_parser(project_id, vector, top_k, sections)}
+    return {
+        "status": "active", "sections": sections or [],
+        "embedding_provider": embedding_client.provider(),
+        "embedding_model": embedding_client.model_name(),
+        "embedding_dimension": embedding_client.dimension(),
+        "chunks": PgVectorStore().search_parser(project_id, vector, top_k, sections),
+    }

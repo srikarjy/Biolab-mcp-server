@@ -33,3 +33,19 @@ def test_nvidia_configuration_uses_nemotron_defaults(monkeypatch):
     assert embedding_client.model_name() == "nvidia/nemotron-3.5-embed-1b"
     assert embedding_client.dimension() == 2048
     assert embedding_client.configured()
+
+
+def test_explicit_provider_wins_over_fallback_flags(monkeypatch):
+    monkeypatch.setenv("BIOLAB_EMBEDDING_PROVIDER", "nvidia")
+    monkeypatch.setenv("BIOLAB_FREE_EMBEDDINGS", "1")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+
+    assert embedding_client.provider() == "nvidia"
+    assert embedding_client.model_name() == "nvidia/nemotron-3.5-embed-1b"
+    assert embedding_client.dimension() == 2048
+
+
+def test_empty_embedding_batch_is_a_noop(monkeypatch):
+    monkeypatch.setenv("BIOLAB_EMBEDDING_PROVIDER", "free")
+
+    assert embedding_client.embed([]) == []
