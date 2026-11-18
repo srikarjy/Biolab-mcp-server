@@ -63,6 +63,7 @@ OPENAPI_SCHEMA = {
         "/v1/projects/{project_id}/retrievals": {"get": {"summary": "List MCP papers selected for a project"}},
         "/v1/projects/{project_id}/retrievals/{retrieval_id}/parse": {"post": {"summary": "Parse a selected MCP paper into the project"}},
         "/v1/projects/{project_id}/rag/search": {"post": {"summary": "Search project-scoped parsed RAG chunks"}},
+        "/v1/projects/{project_id}/rag/answer": {"post": {"summary": "Return an extractive answer grounded in project RAG chunks"}},
         "/v1/projects/{project_id}/rag/notes": {"get": {"summary": "List saved project RAG notes"}, "post": {"summary": "Save an important RAG note"}},
         "/v1/parser/runs/{parser_run_id}": {"get": {"summary": "Inspect parsed document blocks"}},
         "/v1/parser/runs/{parser_run_id}/rebuild-index": {"post": {"summary": "Rebuild project RAG vectors from accepted blocks"}},
@@ -1022,6 +1023,26 @@ async def project_rag_search(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+async def project_rag_answer(request: Request) -> JSONResponse:
+    project_id = request.path_params["project_id"]
+    owner_id = auth.request_identity(request)
+    if not workspace.has_project_access(request.app.state.conn, project_id, owner_id):
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    try:
+        payload = await request.json()
+        sections = payload.get("sections")
+        if sections is not None and (not isinstance(sections, list) or not all(isinstance(section, str) for section in sections)):
+            return JSONResponse({"error": "sections must be a list of strings"}, status_code=400)
+        result = rag.answer_parser_context(project_id, str(payload.get("question", "")), int(payload.get("top_k", 8)), sections)
+        audit.record(request.app.state.conn, project_id, "rag_answered", "project", project_id, owner_id, {"question": str(payload.get("question", "")), "grounded": result.get("grounded", False)})
+        request.app.state.conn.commit()
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    return JSONResponse(result)
+
+
 async def project_rag_notes(request: Request) -> JSONResponse:
     project_id = request.path_params["project_id"]
     owner_id = auth.request_identity(request)
@@ -1354,6 +1375,7 @@ def api_routes() -> list[Route]:
         Route("/v1/projects/{project_id}/retrievals", project_retrievals, methods=["GET", "POST"]),
         Route("/v1/projects/{project_id}/retrievals/{retrieval_id}/parse", parse_project_retrieval, methods=["POST"]),
         Route("/v1/projects/{project_id}/rag/search", project_rag_search, methods=["POST"]),
+        Route("/v1/projects/{project_id}/rag/answer", project_rag_answer, methods=["POST"]),
         Route("/v1/projects/{project_id}/rag/notes", project_rag_notes, methods=["GET", "POST"]),
         Route("/v1/parser/runs/{parser_run_id}", parser_detail),
         Route("/v1/parser/runs/{parser_run_id}/blocks/{block_id}/review", parser_block_review, methods=["POST"]),

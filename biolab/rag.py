@@ -279,3 +279,40 @@ def search_parser_context(project_id: str, question: str, top_k: int = 8, sectio
         "embedding_dimension": embedding_client.dimension(),
         "chunks": chunks,
     }
+
+
+def answer_parser_context(project_id: str, question: str, top_k: int = 8, sections: list[str] | None = None) -> dict[str, Any]:
+    """Return an extractive, citation-linked answer without inventing facts."""
+    result = search_parser_context(project_id, question, top_k, sections)
+    if result.get("status") != "active":
+        return result | {"answer": "", "grounded": False, "citations": []}
+    question_terms = set(re.findall(r"[a-z0-9]+", question.lower()))
+    candidates: list[tuple[int, dict[str, Any], str]] = []
+    for chunk in result.get("chunks", []):
+        for raw_sentence in re.split(r"(?<=[.!?])\s+", str(chunk.get("chunk_text", ""))):
+            sentence = raw_sentence.strip()
+            if not sentence:
+                continue
+            terms = set(re.findall(r"[a-z0-9]+", sentence.lower()))
+            overlap = len(question_terms & terms)
+            if overlap:
+                candidates.append((overlap, chunk, sentence))
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    selected: list[tuple[dict[str, Any], str]] = []
+    seen: set[str] = set()
+    for _score, chunk, sentence in candidates:
+        key = sentence.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append((chunk, sentence))
+        if len(selected) == 3:
+            break
+    if not selected:
+        return result | {
+            "answer": "The reviewed papers do not contain enough matching evidence to answer this question.",
+            "grounded": False, "citations": [],
+        }
+    citations = [chunk.get("citation", {}) for chunk, _sentence in selected]
+    answer = " ".join(sentence for _chunk, sentence in selected)
+    return result | {"answer": answer, "grounded": True, "citations": citations}

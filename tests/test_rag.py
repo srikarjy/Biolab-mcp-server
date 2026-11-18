@@ -63,6 +63,31 @@ def test_project_parser_search_rejects_empty_section_name(monkeypatch):
         rag.search_parser_context("project-1", "question", sections=["  "])
 
 
+def test_extractive_answer_only_uses_matching_reviewed_passages(monkeypatch):
+    citation = {"block_id": "block-1", "page_number": 2, "content_hash": "hash-1"}
+    monkeypatch.setattr(rag, "search_parser_context", lambda *args: {
+        "status": "active", "chunks": [{
+            "chunk_text": "KRAS inhibition reduced tumor growth in the study.",
+            "citation": citation,
+        }],
+    })
+
+    result = rag.answer_parser_context("project-1", "What reduced tumor growth?")
+
+    assert result["grounded"] is True
+    assert result["answer"] == "KRAS inhibition reduced tumor growth in the study."
+    assert result["citations"] == [citation]
+
+
+def test_extractive_answer_refuses_when_no_passage_matches(monkeypatch):
+    monkeypatch.setattr(rag, "search_parser_context", lambda *args: {"status": "active", "chunks": []})
+
+    result = rag.answer_parser_context("project-1", "What happened?")
+
+    assert result["grounded"] is False
+    assert result["citations"] == []
+
+
 def test_local_embedding_configuration_uses_small_model_defaults(monkeypatch):
     monkeypatch.setenv("BIOLAB_LOCAL_EMBEDDINGS", "1")
     monkeypatch.delenv("BIOLAB_EMBEDDING_DIMENSION", raising=False)

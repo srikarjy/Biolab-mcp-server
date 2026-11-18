@@ -340,6 +340,18 @@ def search_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
     return result
 
 
+@mcp.tool(annotations=SEARCH_ANNOTATIONS)
+def answer_project_rag(project_id: str, question: str, ctx: Context, top_k: int = 8, sections: list[str] | None = None) -> dict:
+    """Return an extractive answer grounded in accepted blocks from one project."""
+    owner = _bound("mcp:user", ctx)
+    if not workspace.has_project_access(_conn, project_id, owner):
+        raise ValueError("project not found")
+    result = rag.answer_parser_context(project_id, question, top_k, sections)
+    audit.record(_conn, project_id, "rag_answered", "project", project_id, owner, {"question": question, "grounded": result.get("grounded", False)})
+    _conn.commit()
+    return result
+
+
 @mcp.tool(annotations=READ_ANNOTATIONS)
 def get_project_audit(project_id: str, ctx: Context) -> dict:
     """Verify and return the hash-chained activity history for one project."""
