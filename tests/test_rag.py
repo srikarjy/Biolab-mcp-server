@@ -15,7 +15,11 @@ class FakeVectorStore:
 
     def search_parser(self, project_id, vector, top_k, sections):
         type(self).search_args = (project_id, vector, top_k, sections)
-        return [{"project_id": project_id, "section_name": sections[0] if sections else "unknown"}]
+        return [{
+            "chunk_id": "chunk-1", "project_id": project_id, "document_id": "doc-1",
+            "parser_run_id": "run-1", "block_id": "block-1", "page_number": 2,
+            "section_name": sections[0] if sections else "unknown", "content_hash": "hash-1",
+        }]
 
 
 def test_project_parser_indexing_is_active_and_stable(monkeypatch):
@@ -41,7 +45,16 @@ def test_project_parser_search_preserves_scope_and_section_filter(monkeypatch):
     result = rag.search_parser_context("project-1", "What changed?", 3, ["results"])
 
     assert result["status"] == "active"
-    assert result["chunks"] == [{"project_id": "project-1", "section_name": "results"}]
+    assert result["chunks"] == [{
+        "chunk_id": "chunk-1", "project_id": "project-1", "document_id": "doc-1",
+        "parser_run_id": "run-1", "block_id": "block-1", "page_number": 2,
+        "section_name": "results", "content_hash": "hash-1",
+        "citation": {
+            "chunk_id": "chunk-1", "document_id": "doc-1", "parser_run_id": "run-1",
+            "block_id": "block-1", "page_number": 2, "section_name": "results",
+            "content_hash": "hash-1",
+        },
+    }]
     assert FakeVectorStore.search_args == ("project-1", [0.1, 0.2], 3, ["results"])
 
 

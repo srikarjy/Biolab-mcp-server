@@ -257,10 +257,21 @@ def search_parser_context(project_id: str, question: str, top_k: int = 8, sectio
     if not embedding_client.configured():
         return {"status": "disabled", "reason": "embedding provider not configured", "chunks": []}
     vector = embedding_client.embed([question])[0]
+    chunks = PgVectorStore().search_parser(project_id, vector, top_k, sections)
+    for chunk in chunks:
+        chunk["citation"] = {
+            "chunk_id": chunk.get("chunk_id"),
+            "document_id": chunk.get("document_id"),
+            "parser_run_id": chunk.get("parser_run_id"),
+            "block_id": chunk.get("block_id"),
+            "page_number": chunk.get("page_number"),
+            "section_name": chunk.get("section_name"),
+            "content_hash": chunk.get("content_hash"),
+        }
     return {
         "status": "active", "sections": sections or [],
         "embedding_provider": embedding_client.provider(),
         "embedding_model": embedding_client.model_name(),
         "embedding_dimension": embedding_client.dimension(),
-        "chunks": PgVectorStore().search_parser(project_id, vector, top_k, sections),
+        "chunks": chunks,
     }
