@@ -1044,12 +1044,19 @@ async def project_rag_answer(request: Request) -> JSONResponse:
         cached = request.app.state.conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key)).fetchone()
         if cached:
             result = json.loads(cached[0])
-            result["cached"] = True
-        else:
+            try:
+                document_parser.validate_rag_result(request.app.state.conn, project_id, result)
+            except ValueError:
+                request.app.state.conn.execute("DELETE FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key))
+                cached = None
+        if not cached:
             result = rag.answer_parser_context(project_id, question, top_k, sections)
+            document_parser.validate_rag_result(request.app.state.conn, project_id, result)
             result["cached"] = False
             if result.get("status") == "active":
                 request.app.state.conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, question_key, question, json.dumps(result), rag.embedding_client.model_name()))
+        else:
+            result["cached"] = True
         audit.record(request.app.state.conn, project_id, "rag_answered", "project", project_id, owner_id, {"question": question, "grounded": result.get("grounded", False), "cached": bool(cached)})
         request.app.state.conn.commit()
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -1066,7 +1073,9 @@ async def project_rag_notes(request: Request) -> JSONResponse:
         if request.method == "GET":
             return JSONResponse({"notes": workspace.list_project_notes(request.app.state.conn, project_id, owner_id)})
         payload = await request.json()
-        note = workspace.save_project_note(request.app.state.conn, project_id, str(payload.get("question", "")), str(payload.get("note_text", "")), payload.get("citations", []) if isinstance(payload.get("citations", []), list) else [], owner_id)
+        citations = payload.get("citations", []) if isinstance(payload.get("citations", []), list) else []
+        document_parser.validate_citations(request.app.state.conn, project_id, citations)
+        note = workspace.save_project_note(request.app.state.conn, project_id, str(payload.get("question", "")), str(payload.get("note_text", "")), citations, owner_id)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(note, status_code=201)

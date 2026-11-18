@@ -74,7 +74,8 @@ def test_parsed_documents_live_inside_project_folder_and_download(monkeypatch, t
     assert download.json()["blocks"][0]["text"] == "Stored evidence"
 
 
-def test_selected_mcp_paper_flows_into_project_parser_and_notes(tmp_path):
+def test_selected_mcp_paper_flows_into_project_parser_and_notes(monkeypatch, tmp_path):
+    monkeypatch.setattr(rag, "index_parser_blocks", lambda *args: {"status": "active", "indexed_blocks": len(args[3])})
     app = create_app(tmp_path / "selected-paper.db", require_auth=False)
     with TestClient(app) as client:
         project = client.post("/v1/projects", json={"name": "Paper RAG"}).json()
@@ -86,7 +87,9 @@ def test_selected_mcp_paper_flows_into_project_parser_and_notes(tmp_path):
         selected = client.post(f"/v1/projects/{project['project_id']}/retrievals", json={"retrieval_id": record.retrieval_id})
         papers = client.get(f"/v1/projects/{project['project_id']}/retrievals")
         parsed = client.post(f"/v1/projects/{project['project_id']}/retrievals/{record.retrieval_id}/parse")
-        notes = client.post(f"/v1/projects/{project['project_id']}/rag/notes", json={"question": "What changed?", "note_text": "The reviewed result improved.", "citations": [{"block_id": parsed.json()["blocks"][0]["block_id"]}]})
+        parsed_block = parsed.json()["blocks"][0]
+        client.post(f"/v1/parser/runs/{parsed.json()['parser_run_id']}/blocks/{parsed_block['block_id']}/review", json={"review_state": "accepted"})
+        notes = client.post(f"/v1/projects/{project['project_id']}/rag/notes", json={"question": "What changed?", "note_text": "The reviewed result improved.", "citations": [{"block_id": parsed_block["block_id"], "page_number": parsed_block["page_number"], "content_hash": parsed_block["content_hash"]}]})
         report = client.get(f"/v1/projects/{project['project_id']}/report")
 
     assert selected.status_code == 201
@@ -135,6 +138,7 @@ def test_project_rag_query_is_cached(monkeypatch, tmp_path):
 
 
 def test_project_rag_answer_endpoint_returns_grounding_and_citations(monkeypatch, tmp_path):
+    monkeypatch.setattr("biolab.document_parser.validate_rag_result", lambda *args: None)
     monkeypatch.setattr(rag, "answer_parser_context", lambda *args: {
         "status": "active", "grounded": True, "answer": "The result improved.",
         "citations": [{"block_id": "b1", "page_number": 2}], "chunks": [],
@@ -152,6 +156,7 @@ def test_project_rag_answer_endpoint_returns_grounding_and_citations(monkeypatch
 
 
 def test_project_rag_end_to_end_selection_review_answer_cache_and_audit(monkeypatch, tmp_path):
+    monkeypatch.setattr("biolab.document_parser.validate_rag_result", lambda *args: None)
     monkeypatch.setattr(rag, "index_parser_blocks", lambda *args: {"status": "active", "indexed_blocks": len(args[3])})
     monkeypatch.setattr(rag, "answer_parser_context", lambda project_id, question, top_k, sections: {
         "status": "active", "grounded": True, "answer": "The reviewed result improved.",

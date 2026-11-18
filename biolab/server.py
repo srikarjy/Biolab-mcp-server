@@ -350,12 +350,19 @@ def answer_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
     cached = _conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, key)).fetchone()
     if cached:
         result = json.loads(cached[0])
-        result["cached"] = True
-    else:
+        try:
+            document_parser.validate_rag_result(_conn, project_id, result)
+        except ValueError:
+            _conn.execute("DELETE FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, key))
+            cached = None
+    if not cached:
         result = rag.answer_parser_context(project_id, question, top_k, sections)
+        document_parser.validate_rag_result(_conn, project_id, result)
         result["cached"] = False
         if result.get("status") == "active":
             _conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, key, question, json.dumps(result), rag.embedding_client.model_name()))
+    else:
+        result["cached"] = True
     audit.record(_conn, project_id, "rag_answered", "project", project_id, owner, {"question": question, "grounded": result.get("grounded", False), "cached": bool(cached)})
     _conn.commit()
     return result

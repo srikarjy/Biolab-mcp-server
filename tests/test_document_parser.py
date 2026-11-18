@@ -82,6 +82,24 @@ def test_parser_run_preserves_typed_layout_metadata(monkeypatch, tmp_path):
     assert block["metadata"] == {"caption": "Table 1. Response", "table_id": "table-1"}
 
 
+def test_rag_citation_validation_requires_current_accepted_block(tmp_path):
+    conn = db.connect(str(tmp_path / "citation.db"))
+    project = document_parser.workspace.create_project(conn, "Citations", owner_id="scientist")
+    conn.execute(
+        "INSERT INTO parser_runs (parser_run_id, project_id, document_id, filename, parser_model, source_hash, status, block_count, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("run-citation", project["project_id"], "doc-citation", "paper.txt", "test", "source", "succeeded", 1, "scientist", "now"),
+    )
+    conn.execute(
+        "INSERT INTO parsed_blocks (block_id, parser_run_id, page_number, block_index, block_type, section_name, text, bbox, metadata, content_hash, review_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("block-citation", "run-citation", 2, 0, "paragraph", "results", "The result improved.", "null", "{}", "hash-citation", "accepted", "now"),
+    )
+    conn.commit()
+
+    document_parser.validate_citations(conn, project["project_id"], [{"block_id": "block-citation", "page_number": 2, "content_hash": "hash-citation"}])
+    with pytest.raises(ValueError, match="accepted block"):
+        document_parser.validate_citations(conn, project["project_id"], [{"block_id": "missing", "page_number": 2, "content_hash": "hash-citation"}])
+
+
 def test_accepted_unassigned_block_is_not_written_to_project_rag(monkeypatch, tmp_path):
     conn = db.connect(str(tmp_path / "unassigned.db"))
     monkeypatch.setattr(hf_parser, "parse_document", lambda content, filename: {

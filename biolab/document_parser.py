@@ -64,11 +64,12 @@ def create_parser_run(conn: Any, content: bytes, filename: str, created_by: str,
         (run_id, project_id, document_id, filename, parsed["parser_model"], parsed["source_hash"], retrieval_id, parsed["status"], parsed["block_count"], created_by, created_at),
     )
     for block in parsed["blocks"]:
+        block["content_hash"] = hashlib.sha256(block["text"].encode()).hexdigest()
         conn.execute(
             """INSERT INTO parsed_blocks
                (block_id, parser_run_id, page_number, block_index, block_type, section_name, text, bbox, metadata, content_hash, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (block["block_id"], run_id, block["page_number"], block["block_index"], block["block_type"], block["section_name"], block["text"], json.dumps(block["bbox"]), json.dumps(block.get("metadata", {}), sort_keys=True), hashlib.sha256(block["text"].encode()).hexdigest(), created_at),
+            (block["block_id"], run_id, block["page_number"], block["block_index"], block["block_type"], block["section_name"], block["text"], json.dumps(block["bbox"]), json.dumps(block.get("metadata", {}), sort_keys=True), block["content_hash"], created_at),
         )
     conn.commit()
     vector_status = {"status": "pending_review", "indexed_blocks": 0}
@@ -98,6 +99,36 @@ def get_parser_run(conn: Any, parser_run_id: str) -> dict[str, Any] | None:
         return None
     blocks = conn.execute("SELECT block_id, page_number, block_index, block_type, section_name, text, bbox, metadata, content_hash, review_state, review_note FROM parsed_blocks WHERE parser_run_id = ? ORDER BY page_number, block_index", (parser_run_id,)).fetchall()
     return {"parser_run_id": row[0], "project_id": row[1], "document_id": row[2], "filename": row[3], "parser_model": row[4], "source_hash": row[5], "retrieval_id": row[6], "status": row[7], "block_count": row[8], "created_by": row[9], "created_at": row[10], "blocks": [{"block_id": item[0], "page_number": item[1], "block_index": item[2], "block_type": item[3], "section_name": item[4], "text": item[5], "bbox": json.loads(item[6]) if item[6] != "null" else None, "metadata": json.loads(item[7] or "{}"), "content_hash": item[8], "review_state": item[9], "review_note": item[10]} for item in blocks]}
+
+
+def validate_citations(conn: Any, project_id: str, citations: list[dict[str, Any]]) -> None:
+    """Fail closed unless every citation matches an accepted project block."""
+    for citation in citations:
+        block_id = str(citation.get("block_id", ""))
+        row = conn.execute(
+            """SELECT p.page_number, p.block_type, p.section_name, p.content_hash
+               FROM parsed_blocks p JOIN parser_runs r ON r.parser_run_id = p.parser_run_id
+               WHERE p.block_id = ? AND r.project_id = ? AND p.review_state = 'accepted'""",
+            (block_id, project_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError("citation does not identify an accepted block in this project")
+        if citation.get("content_hash") != row[3] or citation.get("page_number") != row[0]:
+            raise ValueError("citation does not match the current parsed block")
+
+
+def validate_rag_result(conn: Any, project_id: str, result: dict[str, Any]) -> None:
+    """Validate answer citations and exact extractive spans before delivery."""
+    citations = result.get("citations", [])
+    if not isinstance(citations, list):
+        raise TypeError("RAG citations must be a list")
+    validate_citations(conn, project_id, citations)
+    chunks_by_block = {str(chunk.get("block_id")): str(chunk.get("chunk_text", "")) for chunk in result.get("chunks", [])}
+    for span in result.get("answer_spans", []):
+        citation = span.get("citation", {})
+        block_text = chunks_by_block.get(str(citation.get("block_id")))
+        if block_text is None or str(span.get("text", "")) not in block_text:
+            raise ValueError("answer span is not present in its cited retrieved block")
 
 
 def review_block(conn: Any, parser_run_id: str, block_id: str, review_state: str, reviewed_by: str, note: str = "") -> dict[str, Any]:

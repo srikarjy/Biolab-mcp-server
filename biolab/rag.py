@@ -347,8 +347,9 @@ def answer_parser_context(project_id: str, question: str, top_k: int = 8, sectio
     if not selected:
         return result | {
             "answer": "The reviewed papers do not contain enough matching evidence to answer this question.",
-            "grounded": False, "citations": [],
+            "grounded": False, "citations": [], "answer_spans": [],
         }
     citations = [chunk.get("citation", {}) for chunk, _sentence in selected]
     answer = " ".join(sentence for _chunk, sentence in selected)
-    return result | {"answer": answer, "grounded": True, "citations": citations}
+    answer_spans = [{"text": sentence, "citation": chunk.get("citation", {})} for chunk, sentence in selected]
+    return result | {"answer": answer, "grounded": True, "citations": citations, "answer_spans": answer_spans}
