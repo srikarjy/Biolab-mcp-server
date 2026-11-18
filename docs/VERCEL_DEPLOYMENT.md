@@ -26,7 +26,16 @@ the `/api` forms remain available as compatibility URLs for Vercel tooling:
 /
 ```
 
-This deployment path is for a demo or low-state integration. Durable evidence
-storage requires `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`, and the optional
-Turso dependency in the deployment environment. Keep authentication enabled in
-hosted deployments; anonymous mode is only appropriate for an isolated demo.
+This deployment path is for a demo or low-state integration until the free
+durable split backend is configured. Turso/libSQL stores projects, retrieval
+links, parser records, audit history, and query cache; Neon Postgres with
+pgvector stores accepted parser vectors. Configure `TURSO_DATABASE_URL`,
+`TURSO_AUTH_TOKEN`, and `PGVECTOR_DATABASE_URL` in the Vercel Production
+environment. Keep authentication enabled in hosted deployments; anonymous mode
+is only appropriate for an isolated demo.
+
+The repository includes `.env.example`. Copy its variable names into the
+deployment environment, but never commit real values. After configuring them,
+verify `/v1/storage` reports `connected`, `schema_ready`, and
+`durable_claim_allowed: true` for both backends before treating project history
+or RAG vectors as durable.
