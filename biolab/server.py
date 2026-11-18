@@ -346,8 +346,17 @@ def answer_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
     owner = _bound("mcp:user", ctx)
     if not workspace.has_project_access(_conn, project_id, owner):
         raise ValueError("project not found")
-    result = rag.answer_parser_context(project_id, question, top_k, sections)
-    audit.record(_conn, project_id, "rag_answered", "project", project_id, owner, {"question": question, "grounded": result.get("grounded", False)})
+    key = rag.query_key(question, top_k, sections, "answer")
+    cached = _conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, key)).fetchone()
+    if cached:
+        result = json.loads(cached[0])
+        result["cached"] = True
+    else:
+        result = rag.answer_parser_context(project_id, question, top_k, sections)
+        result["cached"] = False
+        if result.get("status") == "active":
+            _conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, key, question, json.dumps(result), rag.embedding_client.model_name()))
+    audit.record(_conn, project_id, "rag_answered", "project", project_id, owner, {"question": question, "grounded": result.get("grounded", False), "cached": bool(cached)})
     _conn.commit()
     return result
 

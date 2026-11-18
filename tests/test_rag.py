@@ -2,6 +2,10 @@ import pytest
 from biolab import embedding_client, rag
 
 
+def test_query_key_separates_search_and_answer_modes():
+    assert rag.query_key("What changed?", 5, ["results"], "search") != rag.query_key("What changed?", 5, ["results"], "answer")
+
+
 class FakeVectorStore:
     indexed: list[dict] = []
     search_args: tuple = ()

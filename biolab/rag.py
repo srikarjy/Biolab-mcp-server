@@ -13,6 +13,12 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from biolab import embedding_client
 
 
+def query_key(question: str, top_k: int, sections: list[str] | None = None, mode: str = "search") -> str:
+    """Return a stable cache key for one project-scoped RAG operation."""
+    payload = {"mode": mode, "question": question.casefold().strip(), "top_k": top_k, "sections": sections or []}
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
 def _normalize_dsn(dsn: str | None) -> str | None:
     """Remove connection options unsupported by older local libpq builds."""
     if not dsn or not dsn.startswith(("postgres://", "postgresql://")):

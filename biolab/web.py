@@ -5,7 +5,6 @@ same evidence and retrieval services as the CLI and MCP server.
 """
 
 import base64
-import hashlib
 import json
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -1004,13 +1003,14 @@ async def project_rag_search(request: Request) -> JSONResponse:
         if sections is not None and (not isinstance(sections, list) or not all(isinstance(section, str) for section in sections)):
             return JSONResponse({"error": "sections must be a list of strings"}, status_code=400)
         question = str(payload.get("question", "")).strip()
-        question_key = hashlib.sha256(json.dumps({"question": question.casefold(), "top_k": int(payload.get("top_k", 8)), "sections": sections or []}, sort_keys=True).encode()).hexdigest()
+        top_k = int(payload.get("top_k", 8))
+        question_key = rag.query_key(question, top_k, sections, "search")
         cached = request.app.state.conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key)).fetchone()
         if cached:
             result = json.loads(cached[0])
             result["cached"] = True
         else:
-            result = rag.search_parser_context(project_id, question, int(payload.get("top_k", 8)), sections)
+            result = rag.search_parser_context(project_id, question, top_k, sections)
             result["cached"] = False
             if result.get("status") == "active":
                 request.app.state.conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, question_key, question, json.dumps(result), result.get("embedding_model", rag.embedding_client.model_name()),))
@@ -1033,8 +1033,19 @@ async def project_rag_answer(request: Request) -> JSONResponse:
         sections = payload.get("sections")
         if sections is not None and (not isinstance(sections, list) or not all(isinstance(section, str) for section in sections)):
             return JSONResponse({"error": "sections must be a list of strings"}, status_code=400)
-        result = rag.answer_parser_context(project_id, str(payload.get("question", "")), int(payload.get("top_k", 8)), sections)
-        audit.record(request.app.state.conn, project_id, "rag_answered", "project", project_id, owner_id, {"question": str(payload.get("question", "")), "grounded": result.get("grounded", False)})
+        question = str(payload.get("question", "")).strip()
+        top_k = int(payload.get("top_k", 8))
+        question_key = rag.query_key(question, top_k, sections, "answer")
+        cached = request.app.state.conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key)).fetchone()
+        if cached:
+            result = json.loads(cached[0])
+            result["cached"] = True
+        else:
+            result = rag.answer_parser_context(project_id, question, top_k, sections)
+            result["cached"] = False
+            if result.get("status") == "active":
+                request.app.state.conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, question_key, question, json.dumps(result), rag.embedding_client.model_name()))
+        audit.record(request.app.state.conn, project_id, "rag_answered", "project", project_id, owner_id, {"question": question, "grounded": result.get("grounded", False), "cached": bool(cached)})
         request.app.state.conn.commit()
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)

@@ -138,11 +138,14 @@ def test_project_rag_answer_endpoint_returns_grounding_and_citations(monkeypatch
     })
     with TestClient(create_app(tmp_path / "rag-answer.db", require_auth=False)) as client:
         project = client.post("/v1/projects", json={"name": "Grounded answer"}).json()
-        response = client.post(f"/v1/projects/{project['project_id']}/rag/answer", json={"question": "What improved?"})
+        path = f"/v1/projects/{project['project_id']}/rag/answer"
+        response = client.post(path, json={"question": "What improved?"})
+        cached = client.post(path, json={"question": "What improved?"})
 
     assert response.status_code == 200
     assert response.json()["grounded"] is True
     assert response.json()["citations"][0]["block_id"] == "b1"
+    assert cached.json()["cached"] is True
 def test_search_api_uses_shared_service(monkeypatch, tmp_path):
     captured = {}
 
