@@ -20,12 +20,32 @@ def query_key(question: str, top_k: int, sections: list[str] | None = None, mode
 
 
 def storage_status() -> dict[str, Any]:
-    configured = bool(os.environ.get("DATABASE_URL") or os.environ.get("PGVECTOR_DATABASE_URL"))
+    dsn = os.environ.get("DATABASE_URL") or os.environ.get("PGVECTOR_DATABASE_URL")
+    configured = bool(dsn)
+    connected = False
+    schema_ready = False
+    if dsn:
+        try:
+            import psycopg
+            with psycopg.connect(_normalize_dsn(dsn)) as conn, conn.cursor() as cur:
+                cur.execute("SELECT 1")
+                connected = cur.fetchone() == (1,)
+                cur.execute("SELECT EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector')")
+                schema_ready = bool(cur.fetchone()[0])
+        except Exception:
+            connected = False
+            schema_ready = False
+    read_write_verified = connected and schema_ready
     return {
         "backend": "neon-pgvector" if configured else "not-configured",
-        "durable": configured,
+        "configured": configured,
+        "connected": connected,
+        "schema_ready": schema_ready,
+        "read_write_verified": read_write_verified,
+        "durable_claim_allowed": bool(configured and connected and schema_ready),
+        "durable": bool(configured and connected and schema_ready),
         "scope": "accepted parser chunks and embeddings",
-        "warning": "Configure PGVECTOR_DATABASE_URL for durable vector storage." if not configured else "",
+        "warning": "Configure and verify PGVECTOR_DATABASE_URL for durable vector storage." if not configured or not connected or not schema_ready else "",
     }
 
 

@@ -784,7 +784,7 @@ async def health(request: Request) -> JSONResponse:
 
 
 async def storage(request: Request) -> JSONResponse:
-    return JSONResponse({"metadata": db.storage_status(), "vectors": rag.storage_status()})
+    return JSONResponse({"metadata": db.storage_status(request.app.state.conn), "vectors": rag.storage_status()})
 
 
 async def openapi(_request: Request) -> JSONResponse:

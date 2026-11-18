@@ -314,14 +314,30 @@ def current_target() -> str | None:
     return _current_target
 
 
-def storage_status() -> dict[str, Any]:
+def storage_status(conn: Any | None = None) -> dict[str, Any]:
     """Describe metadata durability without exposing database credentials."""
     remote = bool(os.environ.get("TURSO_DATABASE_URL"))
+    configured = remote and bool(os.environ.get("TURSO_AUTH_TOKEN"))
+    connected = False
+    schema_ready = False
+    if conn is not None:
+        try:
+            connected = conn.execute("SELECT 1").fetchone() == (1,)
+            schema_ready = bool(conn.execute("SELECT 1 FROM projects LIMIT 1").fetchone() is not None or connected)
+        except Exception:
+            connected = False
+            schema_ready = False
+    read_write_verified = connected and schema_ready
     return {
         "backend": "turso-libsql" if remote else "sqlite",
-        "durable": remote,
+        "configured": configured if remote else True,
+        "connected": connected,
+        "schema_ready": schema_ready,
+        "read_write_verified": read_write_verified,
+        "durable_claim_allowed": bool(remote and configured and connected and schema_ready),
+        "durable": bool(remote and configured and connected and schema_ready),
         "scope": "project metadata, audit history, parser records, and query cache",
-        "warning": "Configure TURSO_DATABASE_URL and TURSO_AUTH_TOKEN for durable deployment metadata." if not remote else "",
+        "warning": "Configure and verify TURSO_DATABASE_URL/TURSO_AUTH_TOKEN for durable deployment metadata." if not remote or not configured or not connected else "",
     }
 
 

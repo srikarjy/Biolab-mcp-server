@@ -375,7 +375,7 @@ def get_project_audit(project_id: str, ctx: Context) -> dict:
 def get_storage_status(ctx: Context) -> dict:
     """Report whether project metadata and RAG vectors are durably configured."""
     _bound("mcp:user", ctx)
-    return {"metadata": db.storage_status(), "vectors": rag.storage_status()}
+    return {"metadata": db.storage_status(_conn), "vectors": rag.storage_status()}
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
