@@ -291,6 +291,35 @@ def flush_parser_block(block_id: str) -> int:
     return PgVectorStore().flush_parser_block(block_id)
 
 
+def select_diverse_chunks(chunks: list[dict[str, Any]], top_k: int) -> list[dict[str, Any]]:
+    """Remove duplicate passages and prefer one hit per document first."""
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for chunk in chunks:
+        key = str(chunk.get("content_hash") or chunk.get("chunk_text", "")).strip().casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        unique.append(chunk)
+    selected: list[dict[str, Any]] = []
+    documents: set[str] = set()
+    for chunk in unique:
+        document_id = str(chunk.get("document_id", ""))
+        if document_id in documents:
+            continue
+        documents.add(document_id)
+        selected.append(chunk)
+        if len(selected) == top_k:
+            return selected
+    for chunk in unique:
+        if chunk in selected:
+            continue
+        selected.append(chunk)
+        if len(selected) == top_k:
+            break
+    return selected
+
+
 def search_parser_context(project_id: str, question: str, top_k: int = 8, sections: list[str] | None = None) -> dict[str, Any]:
     if not question.strip():
         raise ValueError("question must not be empty")
@@ -301,7 +330,8 @@ def search_parser_context(project_id: str, question: str, top_k: int = 8, sectio
     if not embedding_client.configured():
         return {"status": "disabled", "reason": "embedding provider not configured", "chunks": []}
     vector = embedding_client.embed([question])[0]
-    chunks = PgVectorStore().search_parser(project_id, vector, top_k, sections)
+    candidate_limit = min(50, max(top_k, top_k * 3))
+    chunks = select_diverse_chunks(PgVectorStore().search_parser(project_id, vector, candidate_limit, sections), top_k)
     for chunk in chunks:
         chunk["citation"] = {
             "chunk_id": chunk.get("chunk_id"),

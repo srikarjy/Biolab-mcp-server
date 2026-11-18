@@ -32,6 +32,19 @@ class FakeVectorStore:
         }]
 
 
+def test_select_diverse_chunks_deduplicates_and_prefers_documents():
+    chunks = [
+        {"block_id": "a1", "document_id": "doc-a", "content_hash": "same"},
+        {"block_id": "b1", "document_id": "doc-b", "content_hash": "other"},
+        {"block_id": "a2", "document_id": "doc-a", "content_hash": "third"},
+        {"block_id": "duplicate", "document_id": "doc-c", "content_hash": "same"},
+    ]
+
+    selected = rag.select_diverse_chunks(chunks, 3)
+
+    assert [chunk["block_id"] for chunk in selected] == ["a1", "b1", "a2"]
+
+
 def test_project_parser_indexing_is_active_and_stable(monkeypatch):
     FakeVectorStore.indexed = []
     monkeypatch.setattr(rag.embedding_client, "configured", lambda: True)
@@ -65,7 +78,7 @@ def test_project_parser_search_preserves_scope_and_section_filter(monkeypatch):
             "content_hash": "hash-1",
         },
     }]
-    assert FakeVectorStore.search_args == ("project-1", [0.1, 0.2], 3, ["results"])
+    assert FakeVectorStore.search_args == ("project-1", [0.1, 0.2], 9, ["results"])
 
 
 def test_project_parser_search_rejects_empty_section_name(monkeypatch):
