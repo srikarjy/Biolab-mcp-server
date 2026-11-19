@@ -16,6 +16,7 @@ from starlette.routing import Route
 
 from biolab import (
     a2a,
+    audit,
     auth,
     db,
     document_parser,
@@ -49,6 +50,7 @@ OPENAPI_SCHEMA = {
     "paths": {
         "/health": {"get": {"summary": "Health check"}},
         "/metrics": {"get": {"summary": "Local service counters and chain status"}},
+        "/v1/storage": {"get": {"summary": "Report metadata and vector storage durability"}},
         "/v1/evidence/search": {"post": {"summary": "Search and preserve evidence"}},
         "/v1/rankings": {"post": {"summary": "Rank preserved retrievals with explanations"}},
         "/v1/rankings/{ranking_run_id}": {"get": {"summary": "Get a ranking run"}},
@@ -61,7 +63,10 @@ OPENAPI_SCHEMA = {
         "/v1/projects/{project_id}/retrievals": {"get": {"summary": "List MCP papers selected for a project"}},
         "/v1/projects/{project_id}/retrievals/{retrieval_id}/parse": {"post": {"summary": "Parse a selected MCP paper into the project"}},
         "/v1/projects/{project_id}/rag/search": {"post": {"summary": "Search project-scoped parsed RAG chunks"}},
+        "/v1/projects/{project_id}/rag/answer": {"post": {"summary": "Return an extractive answer grounded in project RAG chunks"}},
         "/v1/projects/{project_id}/rag/notes": {"get": {"summary": "List saved project RAG notes"}, "post": {"summary": "Save an important RAG note"}},
+        "/v1/projects/{project_id}/context": {"get": {"summary": "Get project research context"}, "patch": {"summary": "Update project research context"}},
+        "/v1/projects/{project_id}/query-history": {"get": {"summary": "List project-scoped RAG query history"}},
         "/v1/parser/runs/{parser_run_id}": {"get": {"summary": "Inspect parsed document blocks"}},
         "/v1/parser/runs/{parser_run_id}/rebuild-index": {"post": {"summary": "Rebuild project RAG vectors from accepted blocks"}},
         "/v1/parser/runs/{parser_run_id}/blocks/{block_id}/review": {"post": {"summary": "Accept or exclude a parsed block for RAG"}},
@@ -111,10 +116,10 @@ PROJECT_PAGE_HTML = r"""<!doctype html>
 </head>
 <body><main class="shell">
   <nav class="top"><span class="brand">biolab / project workspace</span><a class="back" href="/">← Evidence search</a></nav>
-  <header><p class="eyebrow">Project workspace · Step 02</p><h1 id="title">Loading project…</h1><p class="lede" id="description">Loading the selected project and its preserved evidence.</p></header>
+  <header><p class="eyebrow">Project workspace · Step 02</p><h1 id="title">Loading project…</h1><p class="lede" id="description">Loading the selected project and its preserved evidence.</p><div id="context" class="meta"></div></header>
   <div class="grid">
     <section class="panel"><h2>Selected MCP papers</h2><p class="sub">These are preserved retrievals selected from the evidence search page. Parsing uses the saved record; there is no upload step.</p><div id="papers" class="list"><div class="empty">Loading selected papers…</div></div></section>
-    <section class="panel"><h2>Query the paper RAG</h2><p class="sub">Only reviewed parser blocks can be returned here.</p><form id="query-form" class="query"><input id="question" required placeholder="What does this paper report about KRAS?"><button>Search reviewed passages</button></form><div id="rag" class="list"><div class="empty">Ask a question after indexing reviewed blocks.</div></div><div id="notes" class="list"></div></section>
+  <section class="panel"><h2>Query the paper RAG</h2><p class="sub">Answers use only reviewed parser blocks and show their citations.</p><form id="query-form" class="query"><input id="question" required placeholder="What does this paper report about KRAS?"><button>Ask grounded question</button></form><div id="rag" class="list"><div class="empty">Ask a question after indexing reviewed blocks.</div></div><div id="notes" class="list"></div></section>
     <section class="panel wide"><h2>Parsed papers and review gate</h2><p class="sub">Inspect parser blocks, accept useful passages for the RAG, or exclude them.</p><div id="runs" class="list"><div class="empty">Loading parser runs…</div></div></section>
   </div>
 </main>
@@ -124,7 +129,7 @@ const $=id=>document.getElementById(id);
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||('Request failed '+r.status));return d}
 async function load(){
-  try{const report=await api('/v1/projects/'+encodeURIComponent(projectId)+'/report');const p=report.project||{};$('title').textContent=p.name||'Project workspace';$('description').textContent=p.description||'Selected scientific evidence, parser review, and paper-grounded retrieval.';await Promise.all([papers(),runs(),notes()]);}
+  try{const report=await api('/v1/projects/'+encodeURIComponent(projectId)+'/report');const p=report.project||{};$('title').textContent=p.name||'Project workspace';$('description').textContent=p.description||'Selected scientific evidence, parser review, and paper-grounded retrieval.';const c=await api('/v1/projects/'+encodeURIComponent(projectId)+'/context');$('context').textContent=[c.objective&&'Objective: '+c.objective,c.research_question&&'Question: '+c.research_question,c.scope&&'Scope: '+c.scope].filter(Boolean).join(' · ')||'No research context saved yet.';await Promise.all([papers(),runs(),notes()]);}
   catch(e){$('description').innerHTML='<span class="error">'+esc(e.message)+'</span>'}
 }
 async function papers(){const d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/retrievals');const rows=d.retrievals||[];$('papers').innerHTML=rows.length?rows.map(x=>{const s=x.snapshot||{};return '<article class="item"><strong>'+esc(s.title||s.name||x.external_id)+'</strong><span class="meta">'+esc(x.source)+' · '+esc(x.external_id)+'</span><div class="actions"><button data-parse="'+esc(x.retrieval_id)+'">Parse saved paper</button></div></article>'}).join(''):'<div class="empty">No papers selected yet. Return to evidence search and select a preserved result.</div>'}
@@ -135,7 +140,7 @@ document.addEventListener('click',async e=>{const parse=e.target.closest('[data-
   if(inspect){const run=inspect.closest('[data-run]'),d=await api('/v1/parser/runs/'+encodeURIComponent(inspect.dataset.inspect));run.querySelector('.blocks').innerHTML=(d.blocks||[]).map(b=>'<div class="chunk"><strong>Page '+esc(b.page_number)+' · '+esc(b.section_name)+' · '+esc(b.review_state)+'</strong><br>'+esc(b.text)+'<div class="actions"><button class="secondary" data-review="accepted" data-run="'+esc(b.parser_run_id)+'" data-block="'+esc(b.block_id)+'">Accept for RAG</button><button class="secondary" data-review="excluded" data-run="'+esc(b.parser_run_id)+'" data-block="'+esc(b.block_id)+'">Exclude</button></div></div>').join('')||'<div class="empty">No blocks.</div>'}
   if(review){review.disabled=true;await api('/v1/parser/runs/'+encodeURIComponent(review.dataset.run)+'/blocks/'+encodeURIComponent(review.dataset.block)+'/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({review_state:review.dataset.review})});review.textContent='Saved';}
 }catch(e){alert(e.message)}});
-$('query-form').addEventListener('submit',async e=>{e.preventDefault();$('rag').innerHTML='<div class="empty">Searching…</div>';try{const q=$('question').value.trim(),d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/rag/search',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,top_k:8})});if(d.status==='disabled'){$('rag').innerHTML='<div class="empty">RAG is not active: '+esc(d.reason)+'</div>';return}$('rag').innerHTML=(d.chunks||[]).map(x=>'<article class="chunk"><strong>Page '+esc(x.page_number)+' · '+esc(x.section_name)+'</strong><br>'+esc(x.chunk_text)+'</article>').join('')||'<div class="empty">No reviewed passages matched.</div>'}catch(e){$('rag').innerHTML='<div class="empty error">'+esc(e.message)+'</div>'}});
+$('query-form').addEventListener('submit',async e=>{e.preventDefault();$('rag').innerHTML='<div class="empty">Searching reviewed evidence…</div>';try{const q=$('question').value.trim(),d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/rag/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,top_k:8})});if(d.status==='disabled'){$('rag').innerHTML='<div class="empty">RAG is not active: '+esc(d.reason)+'</div>';return}const answer=d.grounded?'<article class="item"><strong>Grounded answer</strong>'+esc(d.answer)+'<div class="meta">'+(d.citations||[]).map(c=>'Page '+esc(c.page_number)+' · '+esc(c.section_name)+' · '+esc(c.content_hash)).join(' | ')+'</div></article>':'<div class="empty">'+esc(d.answer||'No supported answer.')+'</div>';const passages=(d.chunks||[]).map(x=>'<article class="chunk"><strong>Supporting passage · Page '+esc(x.page_number)+' · '+esc(x.section_name)+'</strong><br>'+esc(x.chunk_text)+'</article>').join('');$('rag').innerHTML=answer+passages}catch(e){$('rag').innerHTML='<div class="empty error">'+esc(e.message)+'</div>'}});
 load();
 </script></body></html>"""
 
@@ -296,8 +301,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           <div id="project-detail" class="project-detail" hidden></div>
         </section>
         <details class="panel side-panel">
-          <summary><strong>Remote API key</strong> <span class="muted">(optional)</span></summary>
-          <p class="kicker">Stored only in this browser tab and sent as a Bearer header.</p>
+          <summary><strong>Remote API key</strong> <span class="muted">(optional for public demos)</span></summary>
+          <p class="kicker">Private deployments require a key. It is stored only in this browser tab and sent as a Bearer header.</p>
           <label class="sr-only" for="api-key">API key</label>
           <input id="api-key" type="password" placeholder="blb_…" autocomplete="off">
         </details>
@@ -309,8 +314,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       <section id="ranking-section" class="ranking-section" hidden aria-labelledby="ranking-title">
         <div class="results-head"><div><p class="eyebrow">Review queue</p><h2 id="ranking-title">Top-ranked papers</h2><p id="ranking-summary" class="summary">Ranking preserved results…</p></div><span class="badge">Step 03 / review</span></div>
         <div id="ranking-results" class="ranking-cards"></div>
+        <label class="project-picker-label" for="project-picker">Project for accepted papers
+          <select id="project-picker"><option value="">Choose a project…</option></select>
+        </label>
         <button id="generate-insights" class="secondary" type="button" style="margin-top:14px">Generate grounded insights</button>
-        <button id="save-reviewed" class="secondary" type="button" style="margin:14px 0 0 8px" disabled>Save accepted papers to selected project</button>
+        <button id="save-reviewed" class="secondary" type="button" style="margin:14px 0 0 8px" disabled>Save accepted papers to project</button>
       </section>
       <section id="insight-section" class="insight-section" hidden aria-labelledby="insight-title">
         <div class="results-head"><div><p class="eyebrow">Evidence-grounded inference</p><h2 id="insight-title">Extracted insights</h2><p id="insight-summary" class="summary"></p></div><span class="badge">Step 04 / cite</span></div>
@@ -328,6 +336,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     const rankingResults = document.querySelector('#ranking-results');
     const generateInsights = document.querySelector('#generate-insights');
     const saveReviewed = document.querySelector('#save-reviewed');
+    const projectPicker = document.querySelector('#project-picker');
     const insightSection = document.querySelector('#insight-section');
     const insightSummary = document.querySelector('#insight-summary');
     const insights = document.querySelector('#insights');
@@ -400,7 +409,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       finally { button.disabled = false; }
     });
     saveReviewed.addEventListener('click', async () => {
-      if (!latestProjectId || !latestRanking) return;
+      latestProjectId = projectPicker.value || latestProjectId;
+      if (!latestProjectId || !latestRanking) { projectPicker.focus(); return; }
       const accepted = latestRanking.candidates.filter(candidate => candidate.review_state === 'accepted').map(candidate => candidate.ranking_candidate_id);
       if (!accepted.length) return;
       saveReviewed.disabled = true;
@@ -412,6 +422,10 @@ DASHBOARD_HTML = r"""<!doctype html>
         document.querySelector('#project-detail').textContent = `Saved ${result.saved_count} reviewed paper(s) to the project collection.`;
       } catch (error) { document.querySelector('#project-detail').textContent = String(error); }
       finally { saveReviewed.disabled = false; }
+    });
+    projectPicker.addEventListener('change', () => {
+      latestProjectId = projectPicker.value || null;
+      saveReviewed.disabled = !(latestProjectId && latestRanking?.candidates?.some(candidate => candidate.review_state === 'accepted'));
     });
     function renderInsights(result) {
       insightSummary.textContent = `${result.insight_count ?? result.claims?.length ?? 0} grounded insights · ${result.parser_version}` + (result.durability === 'request-context' ? ' · session evidence only; configure Turso for durable citations' : '');
@@ -454,16 +468,24 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         const response = await apiFetch('/v1/verify');
         const result = await response.json();
+        if (!response.ok) throw new Error(result.error || `Audit check returned ${response.status}`);
         audit.className = `status${result.valid ? '' : ' bad'}`;
         audit.textContent = result.valid
           ? `Chain valid · ${result.record_count} preserved retrievals`
           : `Chain broken at ${result.first_broken_retrieval_id}`;
         button.textContent = result.valid ? 'Verified just now' : 'Chain needs review';
-      } catch (error) { audit.className = 'status bad'; audit.textContent = 'Audit status unavailable'; }
+      } catch (error) {
+        audit.className = 'status bad';
+        audit.textContent = error instanceof Error && error.message === 'API key required'
+          ? 'Enter an API key to verify the audit ledger'
+          : 'Audit status unavailable';
+        button.textContent = 'Verify audit';
+      }
     }
     async function loadProjects() {
       const response = await apiFetch('/v1/projects');
       const result = await response.json();
+      projectPicker.innerHTML = '<option value="">Choose a project…</option>' + result.projects.map(p => `<option value="${escapeHtml(p.project_id)}">${escapeHtml(p.name)}</option>`).join('');
       document.querySelector('#projects').innerHTML = result.projects.length
         ? result.projects.map(p => `<li><button class="project-item" type="button" data-project-id="${escapeHtml(p.project_id)}"><strong>${escapeHtml(p.name)}</strong><code>${escapeHtml(maskId(p.project_id))}</code></button></li>`).join('')
         : '<li class="muted">No projects yet.</li>';
@@ -494,10 +516,10 @@ DASHBOARD_HTML = r"""<!doctype html>
       const response = await apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/retrievals`);
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || `Paper list returned ${response.status}`);
-      container.innerHTML = result.retrievals.length ? result.retrievals.map(paper => {
+      container.innerHTML = result.retrievals.length ? '<div class="paper-selection-actions"><button class="secondary" type="button" data-parse-selected="'+escapeHtml(projectId)+'">Parse selected papers</button><span class="muted">Select only the papers you want in this project RAG.</span></div>' + result.retrievals.map(paper => {
         const snap = paper.snapshot || {};
         const title = snap.title || snap.name || snap.primary_accession || paper.external_id;
-        return `<article class="paper-card"><strong>${escapeHtml(title)}</strong><br><span class="muted">${escapeHtml(paper.source)} · ${escapeHtml(paper.external_id)} · ${escapeHtml(paper.relevance)}</span><br>
+        return `<article class="paper-card"><label><input type="checkbox" data-paper-select="${escapeHtml(paper.retrieval_id)}" ${paper.parser_run_id ? 'checked' : ''}> <strong>${escapeHtml(title)}</strong></label><br><span class="muted">${escapeHtml(paper.source)} · ${escapeHtml(paper.external_id)} · ${escapeHtml(paper.relevance)}</span><br>
           ${paper.parser_run_id ? `<span class="badge">Parsed into project</span>` : `<button class="secondary" type="button" data-paper-parse="${escapeHtml(paper.retrieval_id)}">Parse this MCP paper</button>`}</article>`;
       }).join('') : '<div class="muted">No MCP papers selected yet. Search above, accept a result, then select it for this project.</div>';
       if (notes) {
@@ -527,6 +549,7 @@ DASHBOARD_HTML = r"""<!doctype html>
           ${report.collections.length} collections · ${report.claims.length} claims · ${(report.parser_runs || []).length} parsed documents · ${report.watches.length} watches<br>
           <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report" target="_blank" rel="noreferrer">Open JSON report ↗</a> ·
           <a href="${apiBase}/v1/projects/${encodeURIComponent(projectId)}/report?format=markdown" target="_blank" rel="noreferrer">Open Markdown report ↗</a>
+          <button class="secondary" type="button" data-project-audit="${escapeHtml(projectId)}">Audit project history</button><div class="project-audit" data-project-audit-output></div>
           <hr><strong>Selected MCP papers</strong><div class="muted">Choose a preserved paper from the evidence results above. Biolab parses its saved title/abstract into this project; no re-upload is needed.</div>
           <div class="paper-list" data-project-papers>Loading selected papers…</div>
           <hr><strong>Query this paper RAG</strong>
@@ -541,7 +564,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     document.querySelector('#verify').addEventListener('click', verify);
     document.querySelector('#projects').addEventListener('click', (event) => {
       const button = event.target.closest('[data-project-id]');
-      if (button) window.location.href = `/projects/${encodeURIComponent(button.dataset.projectId)}`;
+      if (button) { latestProjectId = button.dataset.projectId; projectPicker.value = latestProjectId; window.location.href = `/projects/${encodeURIComponent(button.dataset.projectId)}`; }
     });
     document.querySelector('#project-detail').addEventListener('submit', async (event) => {
       const form = event.target.closest('[data-rag-query]');
@@ -559,10 +582,33 @@ DASHBOARD_HTML = r"""<!doctype html>
       } catch (error) { output.textContent = String(error); }
     });
     document.querySelector('#project-detail').addEventListener('click', async (event) => {
+      const projectAudit = event.target.closest('[data-project-audit]');
       const inspect = event.target.closest('[data-parser-inspect]');
       const rebuild = event.target.closest('[data-parser-rebuild]');
       const review = event.target.closest('[data-parser-review]');
+      const parseSelected = event.target.closest('[data-parse-selected]');
       try {
+        if (parseSelected) {
+          const projectId = parseSelected.dataset.parseSelected;
+          const selected = [...document.querySelectorAll('[data-paper-select]:checked')].map(item => item.dataset.paperSelect);
+          if (!selected.length) throw new Error('Select at least one paper to parse.');
+          parseSelected.disabled = true;
+          for (const retrievalId of selected) {
+            await apiFetch(`/v1/projects/${encodeURIComponent(projectId)}/retrievals/${encodeURIComponent(retrievalId)}/parse`, {method: 'POST'});
+          }
+          await loadProject(projectId);
+          return;
+        }
+        if (projectAudit) {
+          projectAudit.disabled = true;
+          const response = await apiFetch(`/v1/projects/${encodeURIComponent(projectAudit.dataset.projectAudit)}/audit`);
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || `Project audit returned ${response.status}`);
+          const output = document.querySelector('[data-project-audit-output]');
+          output.innerHTML = `<strong>${result.valid ? 'Project history valid' : 'Project history broken'}</strong> · ${result.event_count} events` + (result.events.length ? '<div class="audit-events">' + result.events.map(item => `<div class="audit-event"><strong>${escapeHtml(item.event_type)}</strong><span>${escapeHtml(item.created_at)} · ${escapeHtml(item.entity_type)} ${escapeHtml(item.entity_id)}</span></div>`).join('') + '</div>' : '<div class="muted">No project events yet.</div>');
+          projectAudit.textContent = 'Project history checked';
+          return;
+        }
         if (inspect) {
           const runId = inspect.dataset.parserInspect;
           const output = inspect.closest('[data-run-id]').querySelector('[data-parser-output]');
@@ -613,7 +659,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       try {
         const response = await apiFetch('/v1/projects', {method: 'POST', headers: {'Content-Type': 'application/json'},
           body: JSON.stringify({name})});
-        if (!response.ok) throw new Error(`Project creation returned ${response.status}`);
+        if (!response.ok) {
+          const result = await response.json().catch(() => ({}));
+          throw new Error(result.error === 'API key required'
+            ? 'This deployment requires an API key. Add it under Remote API key.'
+            : result.error || `Project creation returned ${response.status}`);
+        }
         const created = await response.json();
         nameInput.value = '';
         await loadProjects();
@@ -732,6 +783,10 @@ async def project_page(request: Request) -> HTMLResponse:
 async def health(request: Request) -> JSONResponse:
     request.app.state.conn.execute("SELECT 1").fetchone()
     return JSONResponse({"status": "ok", "service": "biolab"})
+
+
+async def storage(request: Request) -> JSONResponse:
+    return JSONResponse({"metadata": db.storage_status(request.app.state.conn), "vectors": rag.storage_status()})
 
 
 async def openapi(_request: Request) -> JSONResponse:
@@ -936,6 +991,8 @@ async def parse_project_retrieval(request: Request) -> JSONResponse:
         result = document_parser.create_parser_run_from_retrieval(
             request.app.state.conn, request.path_params["project_id"], request.path_params["retrieval_id"], auth.request_identity(request)
         )
+        audit.record(request.app.state.conn, request.path_params["project_id"], "paper_parsed", "parser_run", result["parser_run_id"], auth.request_identity(request), {"retrieval_id": request.path_params["retrieval_id"], "block_count": result.get("block_count", 0)})
+        request.app.state.conn.commit()
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     except RuntimeError as exc:
@@ -952,7 +1009,64 @@ async def project_rag_search(request: Request) -> JSONResponse:
         sections = payload.get("sections")
         if sections is not None and (not isinstance(sections, list) or not all(isinstance(section, str) for section in sections)):
             return JSONResponse({"error": "sections must be a list of strings"}, status_code=400)
-        result = rag.search_parser_context(project_id, str(payload.get("question", "")), int(payload.get("top_k", 8)), sections)
+        question = str(payload.get("question", "")).strip()
+        top_k = int(payload.get("top_k", 8))
+        corpus_fingerprint = document_parser.project_corpus_fingerprint(request.app.state.conn, project_id)
+        context_fingerprint = workspace.project_context_fingerprint(request.app.state.conn, project_id)
+        question_key = rag.query_key(question, top_k, sections, "search", corpus_fingerprint, context_fingerprint=context_fingerprint)
+        cached = request.app.state.conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key)).fetchone()
+        if cached:
+            result = json.loads(cached[0])
+            result["cached"] = True
+        else:
+            result = rag.search_parser_context(project_id, question, top_k, sections)
+            result["cached"] = False
+            if result.get("status") == "active":
+                request.app.state.conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, question_key, question, json.dumps(result), result.get("embedding_model", rag.embedding_client.model_name()),))
+        audit.record(request.app.state.conn, project_id, "rag_queried", "project", project_id, auth.request_identity(request), {"question": question, "status": result.get("status", ""), "cached": bool(cached)})
+        workspace.record_query(request.app.state.conn, project_id, question, "search", bool(cached), result.get("status", ""), auth.request_identity(request))
+        request.app.state.conn.commit()
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    except RuntimeError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=503)
+    return JSONResponse(result)
+
+
+async def project_rag_answer(request: Request) -> JSONResponse:
+    project_id = request.path_params["project_id"]
+    owner_id = auth.request_identity(request)
+    if not workspace.has_project_access(request.app.state.conn, project_id, owner_id):
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    try:
+        payload = await request.json()
+        sections = payload.get("sections")
+        if sections is not None and (not isinstance(sections, list) or not all(isinstance(section, str) for section in sections)):
+            return JSONResponse({"error": "sections must be a list of strings"}, status_code=400)
+        question = str(payload.get("question", "")).strip()
+        top_k = int(payload.get("top_k", 8))
+        corpus_fingerprint = document_parser.project_corpus_fingerprint(request.app.state.conn, project_id)
+        context_fingerprint = workspace.project_context_fingerprint(request.app.state.conn, project_id)
+        question_key = rag.query_key(question, top_k, sections, "answer", corpus_fingerprint, context_fingerprint=context_fingerprint)
+        cached = request.app.state.conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key)).fetchone()
+        if cached:
+            result = json.loads(cached[0])
+            try:
+                document_parser.validate_rag_result(request.app.state.conn, project_id, result)
+            except ValueError:
+                request.app.state.conn.execute("DELETE FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key))
+                cached = None
+        if not cached:
+            result = rag.answer_parser_context(project_id, question, top_k, sections)
+            document_parser.validate_rag_result(request.app.state.conn, project_id, result)
+            result["cached"] = False
+            if result.get("status") == "active":
+                request.app.state.conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, question_key, question, json.dumps(result), rag.embedding_client.model_name()))
+        else:
+            result["cached"] = True
+        audit.record(request.app.state.conn, project_id, "rag_answered", "project", project_id, owner_id, {"question": question, "grounded": result.get("grounded", False), "cached": bool(cached)})
+        workspace.record_query(request.app.state.conn, project_id, question, "answer", bool(cached), result.get("status", ""), owner_id)
+        request.app.state.conn.commit()
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     except RuntimeError as exc:
@@ -967,7 +1081,9 @@ async def project_rag_notes(request: Request) -> JSONResponse:
         if request.method == "GET":
             return JSONResponse({"notes": workspace.list_project_notes(request.app.state.conn, project_id, owner_id)})
         payload = await request.json()
-        note = workspace.save_project_note(request.app.state.conn, project_id, str(payload.get("question", "")), str(payload.get("note_text", "")), payload.get("citations", []) if isinstance(payload.get("citations", []), list) else [], owner_id)
+        citations = payload.get("citations", []) if isinstance(payload.get("citations", []), list) else []
+        document_parser.validate_citations(request.app.state.conn, project_id, citations)
+        note = workspace.save_project_note(request.app.state.conn, project_id, str(payload.get("question", "")), str(payload.get("note_text", "")), citations, owner_id)
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
     return JSONResponse(note, status_code=201)
@@ -990,6 +1106,10 @@ async def parser_block_review(request: Request) -> JSONResponse:
             request.app.state.conn, request.path_params["parser_run_id"], request.path_params["block_id"],
             str(payload.get("review_state", "")), auth.request_identity(request), str(payload.get("note", "")),
         )
+        run = document_parser.get_parser_run(request.app.state.conn, request.path_params["parser_run_id"])
+        if run and run.get("project_id"):
+            audit.record(request.app.state.conn, run["project_id"], "parser_block_reviewed", "parsed_block", request.path_params["block_id"], auth.request_identity(request), {"review_state": result.get("review_state", "")})
+            request.app.state.conn.commit()
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400 if "review_state" in str(exc) else 404)
     return JSONResponse(result)
@@ -1008,6 +1128,10 @@ async def parser_rebuild_index(request: Request) -> JSONResponse:
         result = document_parser.rebuild_parser_index(
             request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request)
         )
+        run = document_parser.get_parser_run(request.app.state.conn, request.path_params["parser_run_id"])
+        if run and run.get("project_id"):
+            audit.record(request.app.state.conn, run["project_id"], "rag_index_rebuilt", "parser_run", request.path_params["parser_run_id"], auth.request_identity(request), {"indexed_blocks": result.get("indexed_blocks", 0)})
+            request.app.state.conn.commit()
     except ValueError:
         return JSONResponse({"error": "parser run not found"}, status_code=404)
     except RuntimeError as exc:
@@ -1024,6 +1148,40 @@ async def verify(request: Request) -> JSONResponse:
     )
 
 
+async def project_audit(request: Request) -> JSONResponse:
+    project_id = request.path_params["project_id"]
+    owner_id = auth.request_identity(request)
+    if not workspace.has_project_access(request.app.state.conn, project_id, owner_id):
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    valid, broken_id = audit.verify_project(request.app.state.conn, project_id)
+    events = audit.list_events(request.app.state.conn, project_id)
+    return JSONResponse({"project_id": project_id, "valid": valid, "event_count": len(events), "first_broken_event_id": broken_id, "events": events}, status_code=200 if valid else 409)
+
+
+async def project_context(request: Request) -> JSONResponse:
+    project_id = request.path_params["project_id"]
+    owner_id = auth.request_identity(request)
+    try:
+        if request.method == "GET":
+            context = workspace.get_project_context(request.app.state.conn, project_id, owner_id)
+            if context is None:
+                return JSONResponse({"error": "project not found"}, status_code=404)
+            return JSONResponse(context)
+        payload = await request.json()
+        context = workspace.update_project_context(request.app.state.conn, project_id, owner_id, str(payload.get("objective", "")), str(payload.get("research_question", "")), str(payload.get("scope", "")))
+        return JSONResponse(context)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def project_query_history(request: Request) -> JSONResponse:
+    try:
+        history = workspace.list_query_history(request.app.state.conn, request.path_params["project_id"], auth.request_identity(request))
+    except ValueError:
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    return JSONResponse({"queries": history})
+
+
 async def projects(request: Request) -> JSONResponse:
     owner_id = auth.bind_agent_id("anonymous", request)
     if request.method == "GET":
@@ -1031,7 +1189,8 @@ async def projects(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
         project = workspace.create_project(
-            request.app.state.conn, str(payload.get("name", "")), str(payload.get("description", "")), owner_id
+            request.app.state.conn, str(payload.get("name", "")), str(payload.get("description", "")), owner_id,
+            str(payload.get("objective", "")), str(payload.get("research_question", "")), str(payload.get("scope", ""))
         )
     except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
         return JSONResponse({"error": str(exc)}, status_code=400)
@@ -1260,6 +1419,7 @@ def api_routes() -> list[Route]:
         Route("/", dashboard),
         Route("/projects/{project_id}", project_page),
         Route("/health", health),
+        Route("/v1/storage", storage),
         Route("/openapi.json", openapi),
         Route("/metrics", metrics),
         Route("/v1/evidence/search", search, methods=["POST"]),
@@ -1274,6 +1434,7 @@ def api_routes() -> list[Route]:
         Route("/v1/projects/{project_id}/retrievals", project_retrievals, methods=["GET", "POST"]),
         Route("/v1/projects/{project_id}/retrievals/{retrieval_id}/parse", parse_project_retrieval, methods=["POST"]),
         Route("/v1/projects/{project_id}/rag/search", project_rag_search, methods=["POST"]),
+        Route("/v1/projects/{project_id}/rag/answer", project_rag_answer, methods=["POST"]),
         Route("/v1/projects/{project_id}/rag/notes", project_rag_notes, methods=["GET", "POST"]),
         Route("/v1/parser/runs/{parser_run_id}", parser_detail),
         Route("/v1/parser/runs/{parser_run_id}/blocks/{block_id}/review", parser_block_review, methods=["POST"]),
@@ -1284,6 +1445,9 @@ def api_routes() -> list[Route]:
         Route("/v1/verify", verify),
         Route("/v1/projects", projects, methods=["GET", "POST"]),
         Route("/v1/projects/{project_id}/report", project_report),
+        Route("/v1/projects/{project_id}/audit", project_audit),
+        Route("/v1/projects/{project_id}/context", project_context, methods=["GET", "PATCH"]),
+        Route("/v1/projects/{project_id}/query-history", project_query_history),
         Route("/v1/projects/{project_id}/save-reviewed", save_reviewed_project_evidence, methods=["POST"]),
         Route("/v1/collections", collections, methods=["GET", "POST"]),
         Route("/v1/collections/{collection_id}", collection_detail),

@@ -2,7 +2,7 @@
 
 import base64
 
-from biolab import auth, evidence, retrieval_log
+from biolab import auth, evidence, rag, retrieval_log
 from biolab.web import create_app
 from starlette.testclient import TestClient
 
@@ -13,6 +13,7 @@ def test_dashboard_and_health(tmp_path):
         health = client.get("/health")
         schema = client.get("/openapi.json")
         metrics = client.get("/metrics")
+        storage = client.get("/v1/storage")
 
     assert page.status_code == 200
     assert "Biolab Evidence Workspace" in page.text
@@ -20,6 +21,8 @@ def test_dashboard_and_health(tmp_path):
     assert schema.json()["info"]["version"] == "0.4.1"
     assert metrics.json()["audit_chain_valid"] is True
     assert metrics.json()["counts"]["retrievals"] == 0
+    assert storage.json()["metadata"]["backend"] == "sqlite"
+    assert storage.json()["metadata"]["durable"] is False
 
 
 def test_huggingface_parser_api_persists_and_flushes(monkeypatch, tmp_path):
@@ -71,7 +74,8 @@ def test_parsed_documents_live_inside_project_folder_and_download(monkeypatch, t
     assert download.json()["blocks"][0]["text"] == "Stored evidence"
 
 
-def test_selected_mcp_paper_flows_into_project_parser_and_notes(tmp_path):
+def test_selected_mcp_paper_flows_into_project_parser_and_notes(monkeypatch, tmp_path):
+    monkeypatch.setattr(rag, "index_parser_blocks", lambda *args: {"status": "active", "indexed_blocks": len(args[3])})
     app = create_app(tmp_path / "selected-paper.db", require_auth=False)
     with TestClient(app) as client:
         project = client.post("/v1/projects", json={"name": "Paper RAG"}).json()
@@ -83,7 +87,9 @@ def test_selected_mcp_paper_flows_into_project_parser_and_notes(tmp_path):
         selected = client.post(f"/v1/projects/{project['project_id']}/retrievals", json={"retrieval_id": record.retrieval_id})
         papers = client.get(f"/v1/projects/{project['project_id']}/retrievals")
         parsed = client.post(f"/v1/projects/{project['project_id']}/retrievals/{record.retrieval_id}/parse")
-        notes = client.post(f"/v1/projects/{project['project_id']}/rag/notes", json={"question": "What changed?", "note_text": "The reviewed result improved.", "citations": [{"block_id": parsed.json()["blocks"][0]["block_id"]}]})
+        parsed_block = parsed.json()["blocks"][0]
+        client.post(f"/v1/parser/runs/{parsed.json()['parser_run_id']}/blocks/{parsed_block['block_id']}/review", json={"review_state": "accepted"})
+        notes = client.post(f"/v1/projects/{project['project_id']}/rag/notes", json={"question": "What changed?", "note_text": "The reviewed result improved.", "citations": [{"block_id": parsed_block["block_id"], "page_number": parsed_block["page_number"], "content_hash": parsed_block["content_hash"]}]})
         report = client.get(f"/v1/projects/{project['project_id']}/report")
 
     assert selected.status_code == 201
@@ -93,6 +99,92 @@ def test_selected_mcp_paper_flows_into_project_parser_and_notes(tmp_path):
     assert notes.status_code == 201
     assert report.json()["papers"][0]["retrieval_id"] == record.retrieval_id
     assert report.json()["notes"][0]["note_text"] == "The reviewed result improved."
+
+
+def test_project_audit_records_history_and_detects_tampering(tmp_path):
+    app = create_app(tmp_path / "project-audit.db", require_auth=False)
+    with TestClient(app) as client:
+        project = client.post("/v1/projects", json={"name": "Audit history"}).json()
+        audit_result = client.get(f"/v1/projects/{project['project_id']}/audit")
+        assert audit_result.status_code == 200
+        assert audit_result.json()["valid"] is True
+        assert audit_result.json()["events"][0]["event_type"] == "project_created"
+
+        app.state.conn.execute("UPDATE audit_events SET payload = '{}' WHERE project_id = ?", (project["project_id"],))
+        app.state.conn.commit()
+        broken = client.get(f"/v1/projects/{project['project_id']}/audit")
+
+    assert broken.status_code == 409
+    assert broken.json()["valid"] is False
+
+
+def test_project_rag_query_is_cached(monkeypatch, tmp_path):
+    calls = []
+
+    def fake_search(project_id, question, top_k, sections):
+        calls.append((project_id, question, top_k, sections))
+        return {"status": "active", "chunks": [{"chunk_text": "cached evidence"}]}
+
+    monkeypatch.setattr(rag, "search_parser_context", fake_search)
+    with TestClient(create_app(tmp_path / "rag-cache.db", require_auth=False)) as client:
+        project = client.post("/v1/projects", json={"name": "Cached RAG"}).json()
+        path = f"/v1/projects/{project['project_id']}/rag/search"
+        first = client.post(path, json={"question": "What changed?", "top_k": 3})
+        second = client.post(path, json={"question": "What changed?", "top_k": 3})
+
+    assert first.json()["cached"] is False
+    assert second.json()["cached"] is True
+    assert len(calls) == 1
+
+
+def test_project_rag_answer_endpoint_returns_grounding_and_citations(monkeypatch, tmp_path):
+    monkeypatch.setattr("biolab.document_parser.validate_rag_result", lambda *args: None)
+    monkeypatch.setattr(rag, "answer_parser_context", lambda *args: {
+        "status": "active", "grounded": True, "answer": "The result improved.",
+        "citations": [{"block_id": "b1", "page_number": 2}], "chunks": [],
+    })
+    with TestClient(create_app(tmp_path / "rag-answer.db", require_auth=False)) as client:
+        project = client.post("/v1/projects", json={"name": "Grounded answer"}).json()
+        path = f"/v1/projects/{project['project_id']}/rag/answer"
+        response = client.post(path, json={"question": "What improved?"})
+        cached = client.post(path, json={"question": "What improved?"})
+
+    assert response.status_code == 200
+    assert response.json()["grounded"] is True
+    assert response.json()["citations"][0]["block_id"] == "b1"
+    assert cached.json()["cached"] is True
+
+
+def test_project_rag_end_to_end_selection_review_answer_cache_and_audit(monkeypatch, tmp_path):
+    monkeypatch.setattr("biolab.document_parser.validate_rag_result", lambda *args: None)
+    monkeypatch.setattr(rag, "index_parser_blocks", lambda *args: {"status": "active", "indexed_blocks": len(args[3])})
+    monkeypatch.setattr(rag, "answer_parser_context", lambda project_id, question, top_k, sections: {
+        "status": "active", "grounded": True, "answer": "The reviewed result improved.",
+        "citations": [{"block_id": "stable-block"}], "chunks": [],
+    })
+    app = create_app(tmp_path / "rag-e2e.db", require_auth=False)
+    with TestClient(app) as client:
+        project = client.post("/v1/projects", json={"name": "End-to-end RAG"}).json()
+        record = retrieval_log.write_retrieval(
+            app.state.conn, "KRAS", "PMID-E2E", "api:user", "pubmed", {}, "raw",
+            {"title": "KRAS study", "abstract": "Results improved in the reviewed cohort."},
+        )
+        selected = client.post(f"/v1/projects/{project['project_id']}/retrievals", json={"retrieval_id": record.retrieval_id})
+        parsed = client.post(f"/v1/projects/{project['project_id']}/retrievals/{record.retrieval_id}/parse")
+        block = parsed.json()["blocks"][0]
+        reviewed = client.post(f"/v1/parser/runs/{parsed.json()['parser_run_id']}/blocks/{block['block_id']}/review", json={"review_state": "accepted"})
+        answer_path = f"/v1/projects/{project['project_id']}/rag/answer"
+        answer = client.post(answer_path, json={"question": "What improved?"})
+        cached = client.post(answer_path, json={"question": "What improved?"})
+        history = client.get(f"/v1/projects/{project['project_id']}/audit")
+
+    assert selected.status_code == 201
+    assert parsed.status_code == 201
+    assert reviewed.json()["review_state"] == "accepted"
+    assert answer.json()["grounded"] is True
+    assert cached.json()["cached"] is True
+    assert history.json()["valid"] is True
+    assert {event["event_type"] for event in history.json()["events"]} >= {"paper_selected", "paper_parsed", "parser_block_reviewed", "rag_answered"}
 def test_search_api_uses_shared_service(monkeypatch, tmp_path):
     captured = {}
 
@@ -402,3 +494,21 @@ def test_authenticated_projects_are_isolated_by_owner(tmp_path):
     assert alice.status_code == 201
     assert bob_list.json()["projects"] == []
     assert bob_report.status_code == 404
+
+
+def test_authenticated_caller_cannot_attach_another_callers_retrieval(tmp_path):
+    app = create_app(tmp_path / "retrieval-ownership.db", require_auth=True)
+    with TestClient(app) as client:
+        auth.create_api_key(app.state.conn, "alice", "user:alice")
+        bob_key = auth.create_api_key(app.state.conn, "bob", "user:bob")
+        project = client.post("/v1/projects", headers={"Authorization": f"Bearer {bob_key}"}, json={"name": "Bob project"}).json()
+        record = retrieval_log.write_retrieval(
+            app.state.conn, "KRAS", "PMID-PRIVATE", "user:alice", "pubmed", {}, "raw", {"title": "Private paper"},
+        )
+        response = client.post(
+            f"/v1/projects/{project['project_id']}/retrievals",
+            headers={"Authorization": f"Bearer {bob_key}"},
+            json={"retrieval_id": record.retrieval_id},
+        )
+
+    assert response.status_code == 404

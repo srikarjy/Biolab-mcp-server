@@ -2,6 +2,16 @@ import pytest
 from biolab import embedding_client, rag
 
 
+def test_query_key_separates_search_and_answer_modes():
+    assert rag.query_key("What changed?", 5, ["results"], "search") != rag.query_key("What changed?", 5, ["results"], "answer")
+
+
+def test_query_key_changes_when_corpus_or_embedding_changes():
+    base = rag.query_key("What changed?", 5, corpus_fingerprint="corpus-1", embedding_fingerprint="embed-1")
+    assert rag.query_key("What changed?", 5, corpus_fingerprint="corpus-2", embedding_fingerprint="embed-1") != base
+    assert rag.query_key("What changed?", 5, corpus_fingerprint="corpus-1", embedding_fingerprint="embed-2") != base
+
+
 class FakeVectorStore:
     indexed: list[dict] = []
     search_args: tuple = ()
@@ -15,7 +25,24 @@ class FakeVectorStore:
 
     def search_parser(self, project_id, vector, top_k, sections):
         type(self).search_args = (project_id, vector, top_k, sections)
-        return [{"project_id": project_id, "section_name": sections[0] if sections else "unknown"}]
+        return [{
+            "chunk_id": "chunk-1", "project_id": project_id, "document_id": "doc-1",
+            "parser_run_id": "run-1", "block_id": "block-1", "page_number": 2,
+            "section_name": sections[0] if sections else "unknown", "content_hash": "hash-1",
+        }]
+
+
+def test_select_diverse_chunks_deduplicates_and_prefers_documents():
+    chunks = [
+        {"block_id": "a1", "document_id": "doc-a", "content_hash": "same"},
+        {"block_id": "b1", "document_id": "doc-b", "content_hash": "other"},
+        {"block_id": "a2", "document_id": "doc-a", "content_hash": "third"},
+        {"block_id": "duplicate", "document_id": "doc-c", "content_hash": "same"},
+    ]
+
+    selected = rag.select_diverse_chunks(chunks, 3)
+
+    assert [chunk["block_id"] for chunk in selected] == ["a1", "b1", "a2"]
 
 
 def test_project_parser_indexing_is_active_and_stable(monkeypatch):
@@ -41,13 +68,47 @@ def test_project_parser_search_preserves_scope_and_section_filter(monkeypatch):
     result = rag.search_parser_context("project-1", "What changed?", 3, ["results"])
 
     assert result["status"] == "active"
-    assert result["chunks"] == [{"project_id": "project-1", "section_name": "results"}]
-    assert FakeVectorStore.search_args == ("project-1", [0.1, 0.2], 3, ["results"])
+    assert result["chunks"] == [{
+        "chunk_id": "chunk-1", "project_id": "project-1", "document_id": "doc-1",
+        "parser_run_id": "run-1", "block_id": "block-1", "page_number": 2,
+        "section_name": "results", "content_hash": "hash-1",
+        "citation": {
+            "chunk_id": "chunk-1", "document_id": "doc-1", "parser_run_id": "run-1",
+            "block_id": "block-1", "page_number": 2, "section_name": "results",
+            "content_hash": "hash-1",
+        },
+    }]
+    assert FakeVectorStore.search_args == ("project-1", [0.1, 0.2], 9, ["results"])
 
 
 def test_project_parser_search_rejects_empty_section_name(monkeypatch):
     with pytest.raises(ValueError, match="sections"):
         rag.search_parser_context("project-1", "question", sections=["  "])
+
+
+def test_extractive_answer_only_uses_matching_reviewed_passages(monkeypatch):
+    citation = {"block_id": "block-1", "page_number": 2, "content_hash": "hash-1"}
+    monkeypatch.setattr(rag, "search_parser_context", lambda *args: {
+        "status": "active", "chunks": [{
+            "chunk_text": "KRAS inhibition reduced tumor growth in the study.",
+            "citation": citation,
+        }],
+    })
+
+    result = rag.answer_parser_context("project-1", "What reduced tumor growth?")
+
+    assert result["grounded"] is True
+    assert result["answer"] == "KRAS inhibition reduced tumor growth in the study."
+    assert result["citations"] == [citation]
+
+
+def test_extractive_answer_refuses_when_no_passage_matches(monkeypatch):
+    monkeypatch.setattr(rag, "search_parser_context", lambda *args: {"status": "active", "chunks": []})
+
+    result = rag.answer_parser_context("project-1", "What happened?")
+
+    assert result["grounded"] is False
+    assert result["citations"] == []
 
 
 def test_local_embedding_configuration_uses_small_model_defaults(monkeypatch):

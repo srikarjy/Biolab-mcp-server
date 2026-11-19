@@ -104,6 +104,11 @@ The gate checks:
 - citation block/page/hash validity
 - explicit disabled and insufficient-evidence behavior
 
+`biolab.rag_eval.evaluate_retrieval` is the deterministic gate used by the
+fixture tests. It reports recall@k and MRR, but keeps project, review-state,
+and section-filter violations separate. A relevance score never overrides a
+safety failure.
+
 ## ECC implementation plan
 
 1. **Contract hardening** — add projection metadata/content hashes and make

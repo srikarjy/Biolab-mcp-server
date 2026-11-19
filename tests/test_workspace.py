@@ -143,3 +143,20 @@ def test_project_report_contains_traceable_evidence(tmp_path):
     assert record.retrieval_id in markdown
     assert "not clinical advice" in markdown
     conn.close()
+
+
+def test_project_context_and_query_history_are_project_scoped(tmp_path):
+    conn = db.connect(str(tmp_path / "context.db"))
+    first = workspace.create_project(conn, "First", objective="Study A")
+    second = workspace.create_project(conn, "Second", objective="Study B")
+    workspace.update_project_context(conn, first["project_id"], "local", "Updated A", "Why A?", "A only")
+    workspace.record_query(conn, first["project_id"], "What is A?", "answer", False, "active", "local")
+    workspace.record_query(conn, second["project_id"], "What is B?", "search", True, "active", "local")
+
+    assert workspace.get_project_context(conn, first["project_id"], "local") == {
+        "objective": "Updated A", "research_question": "Why A?", "scope": "A only",
+    }
+    assert [item["question"] for item in workspace.list_query_history(conn, first["project_id"], "local")] == ["What is A?"]
+    assert workspace.get_project_context(conn, second["project_id"], "local")["objective"] == "Study B"
+    assert workspace.project_context_fingerprint(conn, first["project_id"]) != workspace.project_context_fingerprint(conn, second["project_id"])
+    conn.close()

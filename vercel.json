@@ -12,6 +12,10 @@
       "destination": "/api"
     },
     {
+      "source": "/projects/:path*",
+      "destination": "/api/projects/:path*"
+    },
+    {
       "source": "/mcp",
       "destination": "/api/mcp"
     },

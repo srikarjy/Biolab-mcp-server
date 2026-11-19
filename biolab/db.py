@@ -64,7 +64,24 @@ CREATE TABLE IF NOT EXISTS projects (
     description  TEXT NOT NULL DEFAULT '',
     created_at   TEXT NOT NULL,
     owner_id     TEXT NOT NULL DEFAULT 'local',
-    organization_id TEXT
+    organization_id TEXT,
+    objective TEXT NOT NULL DEFAULT '',
+    research_question TEXT NOT NULL DEFAULT '',
+    scope TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS audit_events (
+    event_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, event_type TEXT NOT NULL,
+    entity_type TEXT NOT NULL, entity_id TEXT NOT NULL, actor_id TEXT NOT NULL,
+    payload TEXT NOT NULL, created_at TEXT NOT NULL, prev_hash TEXT NOT NULL, event_hash TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_audit_events_project ON audit_events(project_id, created_at);
+
+CREATE TABLE IF NOT EXISTS rag_query_cache (
+    project_id TEXT NOT NULL, question_key TEXT NOT NULL, question TEXT NOT NULL,
+    result_json TEXT NOT NULL, created_at TEXT NOT NULL, embedding_model TEXT NOT NULL,
+    PRIMARY KEY (project_id, question_key), FOREIGN KEY (project_id) REFERENCES projects(project_id)
 );
 
 CREATE TABLE IF NOT EXISTS organizations (
@@ -270,11 +287,18 @@ CREATE TABLE IF NOT EXISTS project_notes (
     note_text TEXT NOT NULL, citations TEXT NOT NULL DEFAULT '[]', created_by TEXT NOT NULL, created_at TEXT NOT NULL,
     FOREIGN KEY (project_id) REFERENCES projects(project_id)
 );
+CREATE TABLE IF NOT EXISTS project_query_history (
+    query_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, question TEXT NOT NULL,
+    mode TEXT NOT NULL, cache_hit INTEGER NOT NULL DEFAULT 0, result_status TEXT NOT NULL,
+    created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_project_query_history_project ON project_query_history(project_id, created_at);
 CREATE TABLE IF NOT EXISTS parsed_blocks (
     block_id TEXT PRIMARY KEY, parser_run_id TEXT NOT NULL, page_number INTEGER NOT NULL,
     block_index INTEGER NOT NULL, block_type TEXT NOT NULL, section_name TEXT NOT NULL DEFAULT 'unknown',
     text TEXT NOT NULL, review_state TEXT NOT NULL DEFAULT 'pending', review_note TEXT NOT NULL DEFAULT '',
-    bbox TEXT, content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+    bbox TEXT, metadata TEXT NOT NULL DEFAULT '{}', content_hash TEXT NOT NULL, created_at TEXT NOT NULL,
     FOREIGN KEY (parser_run_id) REFERENCES parser_runs(parser_run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_parsed_blocks_run ON parsed_blocks(parser_run_id, page_number, block_index);
@@ -298,6 +322,33 @@ def resolve_target(db_path: str) -> tuple[str, str | None]:
 def current_target() -> str | None:
     """The target most recently passed to connect()."""
     return _current_target
+
+
+def storage_status(conn: Any | None = None) -> dict[str, Any]:
+    """Describe metadata durability without exposing database credentials."""
+    remote = bool(os.environ.get("TURSO_DATABASE_URL"))
+    configured = remote and bool(os.environ.get("TURSO_AUTH_TOKEN"))
+    connected = False
+    schema_ready = False
+    if conn is not None:
+        try:
+            connected = conn.execute("SELECT 1").fetchone() == (1,)
+            schema_ready = bool(conn.execute("SELECT 1 FROM projects LIMIT 1").fetchone() is not None or connected)
+        except Exception:
+            connected = False
+            schema_ready = False
+    read_write_verified = connected and schema_ready
+    return {
+        "backend": "turso-libsql" if remote else "sqlite",
+        "configured": configured if remote else True,
+        "connected": connected,
+        "schema_ready": schema_ready,
+        "read_write_verified": read_write_verified,
+        "durable_claim_allowed": bool(remote and configured and connected and schema_ready),
+        "durable": bool(remote and configured and connected and schema_ready),
+        "scope": "project metadata, audit history, parser records, and query cache",
+        "warning": "Configure and verify TURSO_DATABASE_URL/TURSO_AUTH_TOKEN for durable deployment metadata." if not remote or not configured or not connected else "",
+    }
 
 
 def open_connection(target: str, token: str | None = None) -> Any:
@@ -332,6 +383,9 @@ def _upgrade_projects(conn: Any) -> None:
         conn.execute("ALTER TABLE projects ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'local'")
     if "organization_id" not in columns:
         conn.execute("ALTER TABLE projects ADD COLUMN organization_id TEXT")
+    for name in ("objective", "research_question", "scope"):
+        if name not in columns:
+            conn.execute(f"ALTER TABLE projects ADD COLUMN {name} TEXT NOT NULL DEFAULT ''")
 
 
 def _upgrade_citations(conn: Any) -> None:
@@ -356,6 +410,8 @@ def _upgrade_parser_runs(conn: Any) -> None:
         conn.execute("ALTER TABLE parsed_blocks ADD COLUMN review_state TEXT NOT NULL DEFAULT 'pending'")
     if "review_note" not in block_columns:
         conn.execute("ALTER TABLE parsed_blocks ADD COLUMN review_note TEXT NOT NULL DEFAULT ''")
+    if "metadata" not in block_columns:
+        conn.execute("ALTER TABLE parsed_blocks ADD COLUMN metadata TEXT NOT NULL DEFAULT '{}'")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_parser_runs_project ON parser_runs(project_id, created_at)")
 
 

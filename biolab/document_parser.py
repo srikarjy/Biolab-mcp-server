@@ -64,11 +64,12 @@ def create_parser_run(conn: Any, content: bytes, filename: str, created_by: str,
         (run_id, project_id, document_id, filename, parsed["parser_model"], parsed["source_hash"], retrieval_id, parsed["status"], parsed["block_count"], created_by, created_at),
     )
     for block in parsed["blocks"]:
+        block["content_hash"] = hashlib.sha256(block["text"].encode()).hexdigest()
         conn.execute(
             """INSERT INTO parsed_blocks
-               (block_id, parser_run_id, page_number, block_index, block_type, section_name, text, bbox, content_hash, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (block["block_id"], run_id, block["page_number"], block["block_index"], block["block_type"], block["section_name"], block["text"], json.dumps(block["bbox"]), hashlib.sha256(block["text"].encode()).hexdigest(), created_at),
+               (block_id, parser_run_id, page_number, block_index, block_type, section_name, text, bbox, metadata, content_hash, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (block["block_id"], run_id, block["page_number"], block["block_index"], block["block_type"], block["section_name"], block["text"], json.dumps(block["bbox"]), json.dumps(block.get("metadata", {}), sort_keys=True), block["content_hash"], created_at),
         )
     conn.commit()
     vector_status = {"status": "pending_review", "indexed_blocks": 0}
@@ -96,20 +97,63 @@ def get_parser_run(conn: Any, parser_run_id: str) -> dict[str, Any] | None:
     row = conn.execute("SELECT parser_run_id, project_id, document_id, filename, parser_model, source_hash, retrieval_id, status, block_count, created_by, created_at FROM parser_runs WHERE parser_run_id = ?", (parser_run_id,)).fetchone()
     if row is None:
         return None
-    blocks = conn.execute("SELECT block_id, page_number, block_index, block_type, section_name, text, bbox, content_hash, review_state, review_note FROM parsed_blocks WHERE parser_run_id = ? ORDER BY page_number, block_index", (parser_run_id,)).fetchall()
-    return {"parser_run_id": row[0], "project_id": row[1], "document_id": row[2], "filename": row[3], "parser_model": row[4], "source_hash": row[5], "retrieval_id": row[6], "status": row[7], "block_count": row[8], "created_by": row[9], "created_at": row[10], "blocks": [{"block_id": item[0], "page_number": item[1], "block_index": item[2], "block_type": item[3], "section_name": item[4], "text": item[5], "bbox": json.loads(item[6]) if item[6] != "null" else None, "content_hash": item[7], "review_state": item[8], "review_note": item[9]} for item in blocks]}
+    blocks = conn.execute("SELECT block_id, page_number, block_index, block_type, section_name, text, bbox, metadata, content_hash, review_state, review_note FROM parsed_blocks WHERE parser_run_id = ? ORDER BY page_number, block_index", (parser_run_id,)).fetchall()
+    return {"parser_run_id": row[0], "project_id": row[1], "document_id": row[2], "filename": row[3], "parser_model": row[4], "source_hash": row[5], "retrieval_id": row[6], "status": row[7], "block_count": row[8], "created_by": row[9], "created_at": row[10], "blocks": [{"block_id": item[0], "page_number": item[1], "block_index": item[2], "block_type": item[3], "section_name": item[4], "text": item[5], "bbox": json.loads(item[6]) if item[6] != "null" else None, "metadata": json.loads(item[7] or "{}"), "content_hash": item[8], "review_state": item[9], "review_note": item[10]} for item in blocks]}
+
+
+def validate_citations(conn: Any, project_id: str, citations: list[dict[str, Any]]) -> None:
+    """Fail closed unless every citation matches an accepted project block."""
+    for citation in citations:
+        block_id = str(citation.get("block_id", ""))
+        row = conn.execute(
+            """SELECT p.page_number, p.block_type, p.section_name, p.content_hash
+               FROM parsed_blocks p JOIN parser_runs r ON r.parser_run_id = p.parser_run_id
+               WHERE p.block_id = ? AND r.project_id = ? AND p.review_state = 'accepted'""",
+            (block_id, project_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError("citation does not identify an accepted block in this project")
+        if citation.get("content_hash") != row[3] or citation.get("page_number") != row[0]:
+            raise ValueError("citation does not match the current parsed block")
+
+
+def validate_rag_result(conn: Any, project_id: str, result: dict[str, Any]) -> None:
+    """Validate answer citations and exact extractive spans before delivery."""
+    citations = result.get("citations", [])
+    if not isinstance(citations, list):
+        raise TypeError("RAG citations must be a list")
+    validate_citations(conn, project_id, citations)
+    chunks_by_block = {str(chunk.get("block_id")): str(chunk.get("chunk_text", "")) for chunk in result.get("chunks", [])}
+    for span in result.get("answer_spans", []):
+        citation = span.get("citation", {})
+        block_text = chunks_by_block.get(str(citation.get("block_id")))
+        if block_text is None or str(span.get("text", "")) not in block_text:
+            raise ValueError("answer span is not present in its cited retrieved block")
+
+
+def project_corpus_fingerprint(conn: Any, project_id: str) -> str:
+    """Hash the accepted project corpus used to make cached answers."""
+    rows = conn.execute(
+        """SELECT p.block_id, p.content_hash, p.review_state, r.source_hash
+           FROM parsed_blocks p JOIN parser_runs r ON r.parser_run_id = p.parser_run_id
+           WHERE r.project_id = ? ORDER BY p.block_id""",
+        (project_id,),
+    ).fetchall()
+    payload = [{"block_id": row[0], "content_hash": row[1], "review_state": row[2], "source_hash": row[3]} for row in rows]
+    payload.append({"serialization": "project-corpus-v1"})
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def review_block(conn: Any, parser_run_id: str, block_id: str, review_state: str, reviewed_by: str, note: str = "") -> dict[str, Any]:
     if review_state not in REVIEW_STATES - {"pending"}:
         raise ValueError("review_state must be accepted or excluded")
     run = assert_run_access(conn, parser_run_id, reviewed_by)
-    row = conn.execute("SELECT block_id, page_number, block_type, section_name, text, content_hash FROM parsed_blocks WHERE parser_run_id = ? AND block_id = ?", (parser_run_id, block_id)).fetchone()
+    row = conn.execute("SELECT block_id, page_number, block_type, section_name, text, metadata, content_hash FROM parsed_blocks WHERE parser_run_id = ? AND block_id = ?", (parser_run_id, block_id)).fetchone()
     if row is None:
         raise ValueError("parsed block not found")
     vector_status = {"status": "not_indexed", "indexed_blocks": 0}
     if review_state == "accepted" and run["project_id"]:
-        vector_status = rag.index_parser_blocks(run["project_id"], run["document_id"] or run["parser_run_id"], parser_run_id, [{"block_id": row[0], "page_number": row[1], "block_type": row[2], "section_name": row[3], "text": row[4], "content_hash": row[5]}])
+        vector_status = rag.index_parser_blocks(run["project_id"], run["document_id"] or run["parser_run_id"], parser_run_id, [{"block_id": row[0], "page_number": row[1], "block_type": row[2], "section_name": row[3], "text": row[4], "metadata": json.loads(row[5] or "{}"), "content_hash": row[6]}])
         if vector_status.get("status") != "active":
             return {"parser_run_id": parser_run_id, "block_id": block_id, "review_state": "pending", "review_note": "", "vector_status": vector_status}
     elif review_state == "accepted":
@@ -151,14 +195,14 @@ def rebuild_parser_index(conn: Any, parser_run_id: str, owner_id: str) -> dict[s
     if not run["project_id"]:
         return {"status": "not_indexed", "reason": "project required for project-scoped RAG", "indexed_blocks": 0}
     rows = conn.execute(
-        """SELECT block_id, page_number, block_type, section_name, text, content_hash
+        """SELECT block_id, page_number, block_type, section_name, text, metadata, content_hash
            FROM parsed_blocks WHERE parser_run_id = ? AND review_state = 'accepted'
            ORDER BY page_number, block_index""",
         (parser_run_id,),
     ).fetchall()
     status = rag.index_parser_blocks(
         run["project_id"], run["document_id"] or parser_run_id, parser_run_id,
-        [{"block_id": row[0], "page_number": row[1], "block_type": row[2], "section_name": row[3], "text": row[4], "content_hash": row[5]} for row in rows],
+        [{"block_id": row[0], "page_number": row[1], "block_type": row[2], "section_name": row[3], "text": row[4], "metadata": json.loads(row[5] or "{}"), "content_hash": row[6]} for row in rows],
     )
     status["accepted_blocks"] = len(rows)
     return status

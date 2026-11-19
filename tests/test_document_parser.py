@@ -22,6 +22,49 @@ def test_local_text_parser_works_without_hugging_face_credentials():
     assert parsed["block_count"] == 2
 
 
+def test_local_chunks_are_page_aware_bounded_and_deterministic():
+    content = "Methods were recorded.\n\nResults improved." + " long" * 500 + "\fDiscussion is separate."
+
+    first = hf_parser.fallback_text_blocks(content)
+    second = hf_parser.fallback_text_blocks(content)
+
+    assert first == second
+    assert [block["page_number"] for block in first[:-1]] == [1, 1, 1, 1]
+    assert first[-1]["page_number"] == 2
+    assert all(len(block["text"]) <= hf_parser.MAX_CHUNK_CHARACTERS for block in first)
+    assert all(block["block_id"].startswith("chunk-") for block in first)
+    assert first[-1]["text"] == "Discussion is separate."
+
+
+def test_normalized_parser_blocks_have_stable_ids():
+    raw = {"pages": [{"page": 3, "blocks": [{"type": "paragraph", "text": "  Results  improved.  "}]}]}
+
+    first = hf_parser._normalize(raw)
+    second = hf_parser._normalize(raw)
+
+    assert first == second
+    assert first[0]["text"] == "Results improved."
+    assert first[0]["block_id"].startswith("chunk-")
+
+
+def test_normalize_serializes_table_fields_and_figure_neighbors():
+    raw = {
+        "pages": [{"page": 2, "blocks": [
+            {"type": "paragraph", "text": "The groups differed."},
+            {"type": "figure_caption", "text": "Figure 1", "figure_id": "fig-1", "caption": "Study design"},
+            {"type": "table", "text": "Table 1", "table_id": "tab-1", "caption": "Response", "columns": ["Group", "Response"], "rows": [["A", "4"]]},
+        ]}],
+    }
+
+    blocks = hf_parser._normalize(raw)
+
+    assert "Headers: Group | Response" in blocks[2]["text"]
+    assert "Rows: A | 4" in blocks[2]["text"]
+    assert blocks[2]["metadata"]["table_serialization_hash"]
+    assert blocks[1]["metadata"]["associated_block_ids"] == [blocks[0]["block_id"]]
+    assert blocks[1]["metadata"]["serialization_version"] == "layout-block-v1"
+
+
 def test_parser_run_persists_page_aware_blocks_and_flushes(monkeypatch, tmp_path):
     conn = db.connect(str(tmp_path / "parser.db"))
     monkeypatch.setattr(hf_parser, "parse_document", lambda content, filename: {
@@ -37,6 +80,61 @@ def test_parser_run_persists_page_aware_blocks_and_flushes(monkeypatch, tmp_path
     flushed = document_parser.flush_parser_run(conn, run["parser_run_id"])
     assert flushed["preserved_parsed_blocks"] == 1
     assert document_parser.get_parser_run(conn, run["parser_run_id"])["blocks"][0]["text"] == "KRAS evidence"
+
+
+def test_parser_run_preserves_typed_layout_metadata(monkeypatch, tmp_path):
+    conn = db.connect(str(tmp_path / "layout.db"))
+    monkeypatch.setattr(hf_parser, "parse_document", lambda content, filename: {
+        "parser_model": "layout-parser", "status": "succeeded", "source_hash": "abc", "block_count": 1,
+        "blocks": [{
+            "block_id": "table-1", "page_number": 4, "block_index": 0, "block_type": "table",
+            "text": "Group | Response\nA | 4", "bbox": [1, 2, 3, 4],
+            "metadata": {"caption": "Table 1. Response", "table_id": "table-1"},
+        }],
+    })
+
+    run = document_parser.create_parser_run(conn, b"table", "paper.pdf", "scientist")
+    block = document_parser.get_parser_run(conn, run["parser_run_id"])["blocks"][0]
+
+    assert block["block_type"] == "table"
+    assert block["metadata"] == {"caption": "Table 1. Response", "table_id": "table-1"}
+
+
+def test_rag_citation_validation_requires_current_accepted_block(tmp_path):
+    conn = db.connect(str(tmp_path / "citation.db"))
+    project = document_parser.workspace.create_project(conn, "Citations", owner_id="scientist")
+    conn.execute(
+        "INSERT INTO parser_runs (parser_run_id, project_id, document_id, filename, parser_model, source_hash, status, block_count, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("run-citation", project["project_id"], "doc-citation", "paper.txt", "test", "source", "succeeded", 1, "scientist", "now"),
+    )
+    conn.execute(
+        "INSERT INTO parsed_blocks (block_id, parser_run_id, page_number, block_index, block_type, section_name, text, bbox, metadata, content_hash, review_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("block-citation", "run-citation", 2, 0, "paragraph", "results", "The result improved.", "null", "{}", "hash-citation", "accepted", "now"),
+    )
+    conn.commit()
+
+    document_parser.validate_citations(conn, project["project_id"], [{"block_id": "block-citation", "page_number": 2, "content_hash": "hash-citation"}])
+    with pytest.raises(ValueError, match="accepted block"):
+        document_parser.validate_citations(conn, project["project_id"], [{"block_id": "missing", "page_number": 2, "content_hash": "hash-citation"}])
+
+
+def test_project_corpus_fingerprint_changes_when_reviewed_content_changes(tmp_path):
+    conn = db.connect(str(tmp_path / "corpus-fingerprint.db"))
+    project = document_parser.workspace.create_project(conn, "Corpus", owner_id="scientist")
+    conn.execute(
+        "INSERT INTO parser_runs (parser_run_id, project_id, document_id, filename, parser_model, source_hash, status, block_count, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("run-fingerprint", project["project_id"], "doc-fingerprint", "paper.txt", "test", "source", "succeeded", 1, "scientist", "now"),
+    )
+    conn.execute(
+        "INSERT INTO parsed_blocks (block_id, parser_run_id, page_number, block_index, block_type, section_name, text, bbox, metadata, content_hash, review_state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        ("block-fingerprint", "run-fingerprint", 1, 0, "paragraph", "results", "Evidence", "null", "{}", "hash-1", "pending", "now"),
+    )
+    conn.commit()
+    pending = document_parser.project_corpus_fingerprint(conn, project["project_id"])
+    conn.execute("UPDATE parsed_blocks SET review_state = 'accepted', content_hash = 'hash-2' WHERE block_id = ?", ("block-fingerprint",))
+    conn.commit()
+
+    assert document_parser.project_corpus_fingerprint(conn, project["project_id"]) != pending
 
 
 def test_accepted_unassigned_block_is_not_written_to_project_rag(monkeypatch, tmp_path):
