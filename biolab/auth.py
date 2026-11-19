@@ -6,6 +6,7 @@ higher-throughput budget, not to gate access outright.
 """
 
 import hashlib
+import hmac
 import os
 import secrets
 from collections.abc import Mapping
@@ -43,6 +44,12 @@ def create_api_key(conn: Any, label: str, agent_id: str) -> str:
 
 def verify_api_key(conn: Any, raw_key: str) -> str | None:
     """Return the bound agent_id if `raw_key` is a valid, non-revoked key; None otherwise."""
+    # A hosted deployment may need one operator-provisioned key before its
+    # database-backed key table is reachable. Keep this opt-in, secret-only,
+    # and outside the database so it cannot be listed or accidentally exposed.
+    bootstrap_key = os.environ.get("BIOLAB_BOOTSTRAP_API_KEY", "").strip()
+    if bootstrap_key and hmac.compare_digest(raw_key, bootstrap_key):
+        return os.environ.get("BIOLAB_BOOTSTRAP_AGENT_ID", "demo-user")
     row = conn.execute(
         "SELECT agent_id, revoked FROM api_keys WHERE key_hash = ?",
         (_hash_key(raw_key),),

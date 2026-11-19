@@ -301,8 +301,8 @@ DASHBOARD_HTML = r"""<!doctype html>
           <div id="project-detail" class="project-detail" hidden></div>
         </section>
         <details class="panel side-panel">
-          <summary><strong>Remote API key</strong> <span class="muted">(optional for public demos)</span></summary>
-          <p class="kicker">Private deployments require a key. It is stored only in this browser tab and sent as a Bearer header.</p>
+          <summary><strong>Remote API key</strong> <span class="muted">(required)</span></summary>
+          <p class="kicker">This deployment requires a key. It is stored only in this browser tab and sent as a Bearer header.</p>
           <label class="sr-only" for="api-key">API key</label>
           <input id="api-key" type="password" placeholder="blb_…" autocomplete="off">
         </details>
