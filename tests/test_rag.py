@@ -12,6 +12,11 @@ def test_query_key_changes_when_corpus_or_embedding_changes():
     assert rag.query_key("What changed?", 5, corpus_fingerprint="corpus-1", embedding_fingerprint="embed-2") != base
 
 
+def test_query_key_changes_when_project_context_changes():
+    first = rag.query_key("What changed?", 5, context_fingerprint="context-1")
+    assert rag.query_key("What changed?", 5, context_fingerprint="context-2") != first
+
+
 class FakeVectorStore:
     indexed: list[dict] = []
     search_args: tuple = ()

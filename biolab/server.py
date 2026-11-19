@@ -336,6 +336,7 @@ def search_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
         raise ValueError("project not found")
     result = rag.search_parser_context(project_id, question, top_k, sections)
     audit.record(_conn, project_id, "rag_queried", "project", project_id, owner, {"question": question, "status": result.get("status", "")})
+    workspace.record_query(_conn, project_id, question, "search", False, result.get("status", ""), owner)
     _conn.commit()
     return result
 
@@ -347,7 +348,8 @@ def answer_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
     if not workspace.has_project_access(_conn, project_id, owner):
         raise ValueError("project not found")
     corpus_fingerprint = document_parser.project_corpus_fingerprint(_conn, project_id)
-    key = rag.query_key(question, top_k, sections, "answer", corpus_fingerprint)
+    context_fingerprint = workspace.project_context_fingerprint(_conn, project_id)
+    key = rag.query_key(question, top_k, sections, "answer", corpus_fingerprint, context_fingerprint=context_fingerprint)
     cached = _conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, key)).fetchone()
     if cached:
         result = json.loads(cached[0])
@@ -365,8 +367,30 @@ def answer_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
     else:
         result["cached"] = True
     audit.record(_conn, project_id, "rag_answered", "project", project_id, owner, {"question": question, "grounded": result.get("grounded", False), "cached": bool(cached)})
+    workspace.record_query(_conn, project_id, question, "answer", bool(cached), result.get("status", ""), owner)
     _conn.commit()
     return result
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_project_context(project_id: str, ctx: Context) -> dict:
+    """Return the selected project's research context only."""
+    context = workspace.get_project_context(_conn, project_id, _bound("mcp:user", ctx))
+    if context is None:
+        raise ValueError("project not found")
+    return context
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def update_project_context(project_id: str, ctx: Context, objective: str = "", research_question: str = "", scope: str = "") -> dict:
+    """Update research context for the selected project; it is not global memory."""
+    return workspace.update_project_context(_conn, project_id, _bound("mcp:user", ctx), objective, research_question, scope)
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def list_project_query_history(project_id: str, ctx: Context, limit: int = 50) -> dict:
+    """List only the selected project's recorded RAG queries."""
+    return {"queries": workspace.list_query_history(_conn, project_id, _bound("mcp:user", ctx), limit)}
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
