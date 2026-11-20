@@ -3,7 +3,6 @@
 import sqlite3
 
 import pytest
-
 from biolab import db
 
 

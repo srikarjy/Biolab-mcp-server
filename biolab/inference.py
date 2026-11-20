@@ -15,7 +15,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from biolab import deepseek_client, rag
+from biolab import deepseek_client, rag, retrieval_log
 
 PARSER_VERSION = "grounded-extraction-v1"
 SENTENCE_RE = re.compile(r"[^.!?]+(?:[.!?]+|$)")
@@ -154,7 +154,21 @@ def create_inference(  # noqa: PLR0912 - validation, fallback, parsing, and pers
         snapshot = record.get("snapshot")
         if not isinstance(snapshot, dict) or not record.get("source") or not record.get("external_id"):
             raise ValueError(f"fallback evidence record is incomplete: {retrieval_id}")
-        rows.append((retrieval_id, str(record["source"]), str(record["external_id"]), json.dumps(snapshot, sort_keys=True)))
+        # The parser/chunk and citation tables have foreign keys to retrievals.
+        # Materialize request-context evidence as a preserved local record so
+        # SQLite's integrity checks cannot be bypassed. Keep `missing` intact
+        # so callers still receive the non-durable request-context warning.
+        materialized = retrieval_log.write_retrieval(
+            conn,
+            "request-context inference",
+            str(record["external_id"]),
+            created_by.strip(),
+            str(record["source"]),
+            {"origin": "request_context", "durable": False},
+            json.dumps(snapshot, sort_keys=True),
+            snapshot,
+        )
+        rows.append((materialized.retrieval_id, str(record["source"]), str(record["external_id"]), json.dumps(snapshot, sort_keys=True)))
     if project_id and conn.execute("SELECT 1 FROM projects WHERE project_id = ?", (project_id,)).fetchone() is None:
         raise ValueError("project not found")
     if ranking_run_id and conn.execute("SELECT 1 FROM ranking_runs WHERE ranking_run_id = ?", (ranking_run_id,)).fetchone() is None:
