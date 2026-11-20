@@ -19,6 +19,15 @@ def test_graph_rest_propose_review_expand_and_trace(monkeypatch, tmp_path):
         client.post(f"/v1/projects/{project['project_id']}/retrievals", json={"retrieval_id": record.retrieval_id})
         parsed = client.post(f"/v1/projects/{project['project_id']}/retrievals/{record.retrieval_id}/parse")
         block = parsed.json()["blocks"][0]
+        assert client.post(
+            f"/v1/parser/runs/{parsed.json()['parser_run_id']}/blocks/{block['block_id']}/review",
+            json={"review_state": "accepted"},
+        ).status_code == 200
+        extracted = client.post(
+            f"/v1/projects/{project['project_id']}/graph/extract",
+            json={"parser_run_id": parsed.json()["parser_run_id"]},
+        )
+        assert extracted.status_code == 201
         base = {"provenance": [{"block_id": block["block_id"], "content_hash": block["content_hash"], "excerpt": block["text"]}]}
         first = client.post(f"/v1/projects/{project['project_id']}/graph/proposals", json={**base, "node_type": "gene", "canonical_name": "KRAS"})
         second = client.post(f"/v1/projects/{project['project_id']}/graph/proposals", json={**base, "node_type": "pathway", "canonical_name": "MAPK pathway"})

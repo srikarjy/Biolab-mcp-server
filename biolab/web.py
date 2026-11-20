@@ -85,6 +85,7 @@ OPENAPI_SCHEMA = {
         "/v1/projects/{project_id}/graph/nodes/{node_id}/expand": {"get": {"summary": "Expand an accepted graph node"}},
         "/v1/projects/{project_id}/graph/entities/{entity_id}/trace": {"get": {"summary": "Trace graph provenance"}},
         "/v1/projects/{project_id}/graph/stats": {"get": {"summary": "Get graph counts and fingerprint"}},
+        "/v1/projects/{project_id}/graph/extract": {"post": {"summary": "Extract cited pending graph proposals from an accepted parser run"}},
         "/v1/projects/{project_id}/save-reviewed": {"post": {"summary": "Save accepted ranking candidates to project evidence"}},
         "/v1/collections": {
             "get": {"summary": "List evidence collections"},
@@ -140,16 +141,17 @@ async function load(){
   catch(e){$('description').innerHTML='<span class="error">'+esc(e.message)+'</span>'}
 }
 async function papers(){const d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/retrievals');const rows=d.retrievals||[];$('papers').innerHTML=rows.length?rows.map(x=>{const s=x.snapshot||{};return '<article class="item"><strong>'+esc(s.title||s.name||x.external_id)+'</strong><span class="meta">'+esc(x.source)+' · '+esc(x.external_id)+'</span><div class="actions"><button data-parse="'+esc(x.retrieval_id)+'">Parse saved paper</button></div></article>'}).join(''):'<div class="empty">No papers selected yet. Return to evidence search and select a preserved result.</div>'}
-async function runs(){const d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/parser-runs');const rows=d.parser_runs||[];$('runs').innerHTML=rows.length?rows.map(x=>'<article class="item" data-run="'+esc(x.parser_run_id)+'"><strong>'+esc(x.title||x.source_name||'Parsed paper')+'</strong><span class="meta">'+esc(x.status||x.review_state||'parsed')+' · '+esc(x.parser_run_id)+'</span><div class="actions"><button class="secondary" data-inspect="'+esc(x.parser_run_id)+'">Inspect blocks</button></div><div class="blocks"></div></article>').join(''):'<div class="empty">No parsed papers yet. Parse one of the selected papers above.</div>'}
+async function runs(){const d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/parser-runs');const rows=d.parser_runs||[];$('runs').innerHTML=rows.length?rows.map(x=>'<article class="item" data-run="'+esc(x.parser_run_id)+'"><strong>'+esc(x.title||x.source_name||'Parsed paper')+'</strong><span class="meta">'+esc(x.status||x.review_state||'parsed')+' · '+esc(x.parser_run_id)+'</span><div class="actions"><button class="secondary" data-inspect="'+esc(x.parser_run_id)+'">Inspect blocks</button><button class="secondary" data-extract="'+esc(x.parser_run_id)+'">Extract graph proposals</button></div><div class="blocks"></div></article>').join(''):'<div class="empty">No parsed papers yet. Parse one of the selected papers above.</div>'}
 async function notes(){const d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/rag/notes');const rows=d.notes||[];$('notes').innerHTML=rows.length?'<h3>Saved notes</h3>'+rows.map(x=>'<article class="item"><strong>'+esc(x.note_text)+'</strong><span class="meta">'+esc(x.question||'Saved from RAG')}</span></article>').join(''):''}
 async function graphReview(){const [s,p]=await Promise.all([api('/v1/projects/'+encodeURIComponent(projectId)+'/graph/stats'),api('/v1/projects/'+encodeURIComponent(projectId)+'/graph/proposals?status=pending')]);$('graph-stats').textContent=s.graph_proposals+' proposals · '+s.graph_nodes+' nodes · '+s.graph_edges+' edges · '+s.pending_proposals+' awaiting review';$('graph-proposals').innerHTML=(p.proposals||[]).map(x=>'<article class="item"><strong>'+esc(x.proposal_type)+' proposal · '+esc(x.payload.canonical_name||x.payload.predicate||x.proposal_id)+'</strong><span class="meta">Pending human review · provenance attached</span><div class="actions"><button data-graph-review="accepted" data-proposal="'+esc(x.proposal_id)+'">Accept</button><button class="secondary" data-graph-review="rejected" data-proposal="'+esc(x.proposal_id)+'">Reject</button><button class="secondary" data-graph-review="deferred" data-proposal="'+esc(x.proposal_id)+'">Defer</button></div></article>').join('')||'<div class="empty">No pending graph proposals. Extraction will place source-backed facts here.</div>'}
-document.addEventListener('click',async e=>{const parse=e.target.closest('[data-parse]'),inspect=e.target.closest('[data-inspect]'),review=e.target.closest('[data-review]'),graphReviewButton=e.target.closest('[data-graph-review]');try{
+document.addEventListener('click',async e=>{const parse=e.target.closest('[data-parse]'),inspect=e.target.closest('[data-inspect]'),review=e.target.closest('[data-review]'),extract=e.target.closest('[data-extract]'),graphReviewButton=e.target.closest('[data-graph-review]');try{
   if(parse){parse.disabled=true;await api('/v1/projects/'+encodeURIComponent(projectId)+'/retrievals/'+encodeURIComponent(parse.dataset.parse)+'/parse',{method:'POST'});await runs()}
   if(inspect){const run=inspect.closest('[data-run]'),d=await api('/v1/parser/runs/'+encodeURIComponent(inspect.dataset.inspect));run.querySelector('.blocks').innerHTML=(d.blocks||[]).map(b=>'<div class="chunk"><strong>Page '+esc(b.page_number)+' · '+esc(b.section_name)+' · '+esc(b.review_state)+'</strong><br>'+esc(b.text)+'<div class="actions"><button class="secondary" data-review="accepted" data-run="'+esc(b.parser_run_id)+'" data-block="'+esc(b.block_id)+'">Accept for RAG</button><button class="secondary" data-review="excluded" data-run="'+esc(b.parser_run_id)+'" data-block="'+esc(b.block_id)+'">Exclude</button></div></div>').join('')||'<div class="empty">No blocks.</div>'}
   if(review){review.disabled=true;await api('/v1/parser/runs/'+encodeURIComponent(review.dataset.run)+'/blocks/'+encodeURIComponent(review.dataset.block)+'/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({review_state:review.dataset.review})});review.textContent='Saved';}
+  if(extract){extract.disabled=true;const result=await api('/v1/projects/'+encodeURIComponent(projectId)+'/graph/extract',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({parser_run_id:extract.dataset.extract})});extract.textContent='Extracted '+result.node_proposals+' nodes';await graphReview()}
   if(graphReviewButton){graphReviewButton.disabled=true;await api('/v1/projects/'+encodeURIComponent(projectId)+'/graph/proposals/'+encodeURIComponent(graphReviewButton.dataset.proposal)+'/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({decision:graphReviewButton.dataset.graphReview,reviewer_role:'owner'})});await graphReview()}
 }catch(e){alert(e.message)}});
-$('query-form').addEventListener('submit',async e=>{e.preventDefault();$('rag').innerHTML='<div class="empty">Searching reviewed evidence…</div>';try{const q=$('question').value.trim(),d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/rag/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,top_k:8})});if(d.status==='disabled'){$('rag').innerHTML='<div class="empty">RAG is not active: '+esc(d.reason)+'</div>';return}const answer=d.grounded?'<article class="item"><strong>Grounded answer</strong>'+esc(d.answer)+'<div class="meta">'+(d.citations||[]).map(c=>'Page '+esc(c.page_number)+' · '+esc(c.section_name)+' · '+esc(c.content_hash)).join(' | ')+'</div></article>':'<div class="empty">'+esc(d.answer||'No supported answer.')+'</div>';const passages=(d.chunks||[]).map(x=>'<article class="chunk"><strong>Supporting passage · Page '+esc(x.page_number)+' · '+esc(x.section_name)+'</strong><br>'+esc(x.chunk_text)+'</article>').join('');$('rag').innerHTML=answer+passages}catch(e){$('rag').innerHTML='<div class="empty error">'+esc(e.message)+'</div>'}});
+$('query-form').addEventListener('submit',async e=>{e.preventDefault();$('rag').innerHTML='<div class="empty">Searching reviewed evidence…</div>';try{const q=$('question').value.trim(),d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/rag/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,top_k:8})});if(d.status==='disabled'){$('rag').innerHTML='<div class="empty">RAG is not active: '+esc(d.reason)+'</div>';return}const answer=d.grounded?'<article class="item"><strong>Grounded answer</strong>'+esc(d.answer)+'<div class="meta">'+(d.citations||[]).map(c=>'Page '+esc(c.page_number)+' · '+esc(c.section_name)+' · '+esc(c.content_hash)).join(' | ')+'</div></article>':'<div class="empty">'+esc(d.answer||'No supported answer.')+'</div>';const facts=(d.graph_context||[]).map(x=>'<article class="chunk"><strong>Accepted graph fact</strong><br>'+esc(x.subject)+' '+esc(x.predicate)+' '+esc(x.object)+'</article>').join('');const passages=(d.chunks||[]).map(x=>'<article class="chunk"><strong>Supporting passage · Page '+esc(x.page_number)+' · '+esc(x.section_name)+'</strong><br>'+esc(x.chunk_text)+'</article>').join('');$('rag').innerHTML=answer+facts+passages}catch(e){$('rag').innerHTML='<div class="empty error">'+esc(e.message)+'</div>'}});
 load();
 </script></body></html>"""
 
@@ -1021,7 +1023,7 @@ async def project_rag_search(request: Request) -> JSONResponse:
         question = str(payload.get("question", "")).strip()
         top_k = int(payload.get("top_k", 8))
         corpus_fingerprint = document_parser.project_corpus_fingerprint(request.app.state.conn, project_id)
-        context_fingerprint = workspace.project_context_fingerprint(request.app.state.conn, project_id)
+        context_fingerprint = workspace.project_context_fingerprint(request.app.state.conn, project_id) + ":" + graph.accepted_fingerprint(request.app.state.conn, project_id, owner_id=auth.request_identity(request))
         question_key = rag.query_key(question, top_k, sections, "search", corpus_fingerprint, context_fingerprint=context_fingerprint)
         cached = request.app.state.conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key)).fetchone()
         if cached:
@@ -1029,6 +1031,7 @@ async def project_rag_search(request: Request) -> JSONResponse:
             result["cached"] = True
         else:
             result = rag.search_parser_context(project_id, question, top_k, sections)
+            result["graph_context"] = graph.query_context(request.app.state.conn, project_id, question, owner_id=auth.request_identity(request), limit=top_k)
             result["cached"] = False
             if result.get("status") == "active":
                 request.app.state.conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, question_key, question, json.dumps(result), result.get("embedding_model", rag.embedding_client.model_name()),))
@@ -1055,7 +1058,7 @@ async def project_rag_answer(request: Request) -> JSONResponse:
         question = str(payload.get("question", "")).strip()
         top_k = int(payload.get("top_k", 8))
         corpus_fingerprint = document_parser.project_corpus_fingerprint(request.app.state.conn, project_id)
-        context_fingerprint = workspace.project_context_fingerprint(request.app.state.conn, project_id)
+        context_fingerprint = workspace.project_context_fingerprint(request.app.state.conn, project_id) + ":" + graph.accepted_fingerprint(request.app.state.conn, project_id, owner_id=owner_id)
         question_key = rag.query_key(question, top_k, sections, "answer", corpus_fingerprint, context_fingerprint=context_fingerprint)
         cached = request.app.state.conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, question_key)).fetchone()
         if cached:
@@ -1067,6 +1070,7 @@ async def project_rag_answer(request: Request) -> JSONResponse:
                 cached = None
         if not cached:
             result = rag.answer_parser_context(project_id, question, top_k, sections)
+            result["graph_context"] = graph.query_context(request.app.state.conn, project_id, question, owner_id=owner_id, limit=top_k)
             document_parser.validate_rag_result(request.app.state.conn, project_id, result)
             result["cached"] = False
             if result.get("status") == "active":
@@ -1244,6 +1248,18 @@ async def project_graph_stats(request: Request) -> JSONResponse:
     except ValueError as exc:
         return JSONResponse({"error": str(exc)}, status_code=404)
     return JSONResponse(result)
+
+
+async def project_graph_extract(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        result = graph.extract_parser_run(
+            request.app.state.conn, str(payload.get("parser_run_id", "")),
+            owner_id=auth.request_identity(request),
+        )
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(result, status_code=201)
 
 
 async def project_context(request: Request) -> JSONResponse:
@@ -1539,6 +1555,7 @@ def api_routes() -> list[Route]:
         Route("/v1/projects/{project_id}/graph/nodes/{node_id}/expand", project_graph_expand),
         Route("/v1/projects/{project_id}/graph/entities/{entity_id}/trace", project_graph_trace),
         Route("/v1/projects/{project_id}/graph/stats", project_graph_stats),
+        Route("/v1/projects/{project_id}/graph/extract", project_graph_extract, methods=["POST"]),
         Route("/v1/projects/{project_id}/context", project_context, methods=["GET", "PATCH"]),
         Route("/v1/projects/{project_id}/query-history", project_query_history),
         Route("/v1/projects/{project_id}/save-reviewed", save_reviewed_project_evidence, methods=["POST"]),

@@ -416,6 +416,22 @@ def get_graph_stats(project_id: str, ctx: Context) -> dict:
     return graph.stats(_conn, project_id, owner_id=_bound("mcp:user", ctx))
 
 
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def extract_project_graph(project_id: str, parser_run_id: str, ctx: Context) -> dict:
+    """Extract pending, provenance-backed graph proposals from accepted parser blocks."""
+    owner = _bound("mcp:user", ctx)
+    run = _conn.execute("SELECT project_id FROM parser_runs WHERE parser_run_id = ?", (parser_run_id,)).fetchone()
+    if run is None or run[0] != project_id:
+        raise ValueError("parser run not found")
+    return graph.extract_parser_run(_conn, parser_run_id, owner_id=owner)
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def query_project_graph(project_id: str, question: str, ctx: Context, limit: int = 8) -> dict:
+    """Return accepted graph facts relevant to a project question."""
+    return {"facts": graph.query_context(_conn, project_id, question, owner_id=_bound("mcp:user", ctx), limit=limit)}
+
+
 @mcp.tool(annotations=READ_ANNOTATIONS)
 def expand_graph_entity(project_id: str, node_id: str, ctx: Context, limit: int = 50) -> dict:
     """Expand one accepted graph node; pending relationships are never returned."""

@@ -526,6 +526,8 @@ def test_project_click_opens_dedicated_workspace_page(tmp_path):
     assert page.status_code == 200
     assert "Selected MCP papers" in page.text
     assert "Parsed papers and review gate" in page.text
+    assert "Knowledge graph review" in page.text
+    assert "Extract graph proposals" in page.text
     assert 'type="file"' not in page.text.lower()
     assert ">upload<" not in page.text.lower()
     assert missing.status_code == 404

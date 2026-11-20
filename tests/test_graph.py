@@ -64,3 +64,25 @@ def test_graph_service_enforces_project_access(tmp_path):
 
     with pytest.raises(ValueError, match="access denied"):
         graph.create_node_proposal(conn, project_id, "gene", "KRAS", owner_id="bob", provenance=source)
+
+
+def test_extraction_creates_pending_cited_proposals_and_context_after_review(tmp_path):
+    conn, project_id, source = _setup(tmp_path)
+    conn.execute("UPDATE parsed_blocks SET text = 'KRAS activates MAPK and KRAS interacts with TP53.', review_state = 'accepted' WHERE block_id = 'block-1'")
+    conn.commit()
+
+    result = graph.extract_parser_run(conn, "run-1", owner_id="alice")
+    assert result["status"] == "completed"
+    assert result["node_proposals"] >= 3
+    proposals = graph.list_proposals(conn, project_id, owner_id="alice", status="pending")
+    assert all(graph.trace_entity(conn, project_id, item["proposal_id"], owner_id="alice") for item in proposals)
+
+    for proposal in proposals:
+        if proposal["proposal_type"] == "node":
+            graph.review_proposal(conn, proposal["proposal_id"], owner_id="alice", decision="accepted", reviewer_role="scientist")
+    for proposal in graph.list_proposals(conn, project_id, owner_id="alice", status="pending"):
+        if proposal["proposal_type"] == "edge":
+            graph.review_proposal(conn, proposal["proposal_id"], owner_id="alice", decision="accepted", reviewer_role="scientist")
+
+    facts = graph.query_context(conn, project_id, "What activates MAPK?", owner_id="alice")
+    assert any(item["subject"] == "KRAS" and item["object"] == "MAPK" for item in facts)

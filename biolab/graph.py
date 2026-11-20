@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -17,6 +18,8 @@ from biolab import audit, workspace
 NODE_TYPES = {"paper", "author", "gene", "protein", "disease", "drug", "pathway", "method", "organization", "claim", "evidence_block"}
 PROPOSAL_STATES = {"pending", "accepted", "edited", "rejected", "deferred", "superseded"}
 REVIEW_DECISIONS = {"accepted", "edited", "rejected", "deferred"}
+_EXTRACTOR_VERSION = "deterministic-graph-v1"
+_STOP_SYMBOLS = {"THE", "AND", "WITH", "FROM", "THIS", "THAT", "WAS", "ARE", "FOR", "INTO", "PATHWAY"}
 
 
 def _now() -> str:
@@ -376,3 +379,123 @@ def stats(conn: Any, project_id: str, *, owner_id: str) -> dict[str, Any]:
     counts["pending_proposals"] = conn.execute("SELECT COUNT(*) FROM graph_proposals WHERE project_id = ? AND status = 'pending'", (project_id,)).fetchone()[0]
     counts["accepted_fingerprint"] = accepted_fingerprint(conn, project_id, owner_id=owner_id)
     return counts
+
+
+def extract_parser_run(conn: Any, parser_run_id: str, *, owner_id: str) -> dict[str, Any]:
+    """Create cited, pending graph proposals from accepted parser blocks.
+
+    This extractor is deliberately deterministic. It proposes entities and a
+    small set of explicit relationships; it never changes a proposal to a
+    trusted graph state.
+    """
+    run = conn.execute(
+        "SELECT parser_run_id, project_id FROM parser_runs WHERE parser_run_id = ?", (parser_run_id,)
+    ).fetchone()
+    if run is None or not run[1]:
+        raise ValueError("parser run not found")
+    project_id = run[1]
+    _require_access(conn, project_id, owner_id)
+    blocks = conn.execute(
+        """SELECT block_id, page_number, section_name, text, content_hash
+           FROM parsed_blocks WHERE parser_run_id = ? AND review_state = 'accepted'
+           ORDER BY page_number, block_index""",
+        (parser_run_id,),
+    ).fetchall()
+    if not blocks:
+        raise ValueError("no accepted parser blocks available for extraction")
+    extraction_run_id = str(uuid.uuid4())
+    created_at = _now()
+    conn.execute(
+        """INSERT INTO graph_extraction_runs
+           (extraction_run_id, project_id, parser_run_id, extractor_type, extractor_version,
+            input_block_hashes, output_schema_version, status, created_at)
+           VALUES (?, ?, ?, 'deterministic', ?, ?, 'graph-v1', 'pending', ?)""",
+        (extraction_run_id, project_id, parser_run_id, _EXTRACTOR_VERSION, _json([row[4] for row in blocks]), created_at),
+    )
+    source_by_token: dict[str, list[dict[str, Any]]] = {}
+    node_ids: dict[tuple[str, str], str] = {}
+    proposals = 0
+    edges = 0
+    try:
+        for block_id, page_number, section_name, text, content_hash in blocks:
+            provenance = [{
+                "block_id": block_id, "parser_run_id": parser_run_id, "page_number": page_number,
+                "content_hash": content_hash, "excerpt": text[:500], "locator": {"section": section_name},
+                "extractor_version": _EXTRACTOR_VERSION,
+            }]
+            tokens = set(re.findall(r"\b[A-Z][A-Z0-9-]{1,9}\b", text))
+            tokens -= _STOP_SYMBOLS
+            for token in sorted(tokens):
+                key = ("gene", _normalize_name(token))
+                if key not in node_ids:
+                    proposal = create_node_proposal(
+                        conn, project_id, "gene", token, owner_id=owner_id,
+                        namespace="symbol", properties={"extraction": "uppercase_symbol"},
+                        extraction_run_id=extraction_run_id, provenance=provenance, created_by=owner_id,
+                    )
+                    node_ids[key] = proposal["node_id"]
+                    proposals += 1
+                source_by_token.setdefault(token, []).append({"provenance": provenance, "block": block_id})
+            for pathway in re.findall(r"\b([A-Za-z0-9-]+(?:/[A-Za-z0-9-]+){1,2})\s+pathway\b", text, flags=re.IGNORECASE):
+                key = ("pathway", _normalize_name(pathway + " pathway"))
+                if key not in node_ids:
+                    proposal = create_node_proposal(
+                        conn, project_id, "pathway", pathway + " pathway", owner_id=owner_id,
+                        namespace="text", properties={"extraction": "pathway_phrase"},
+                        extraction_run_id=extraction_run_id, provenance=provenance, created_by=owner_id,
+                    )
+                    node_ids[key] = proposal["node_id"]
+                    proposals += 1
+            for subject, relation, object_name in re.findall(
+                r"\b([A-Z][A-Z0-9-]{1,9})\s+(activates|inhibits|interacts with|associated with)\s+([A-Z][A-Z0-9-]{1,9})\b",
+                text,
+            ):
+                if subject in _STOP_SYMBOLS or object_name in _STOP_SYMBOLS:
+                    continue
+                subject_id = node_ids.get(("gene", _normalize_name(subject)))
+                object_id = node_ids.get(("gene", _normalize_name(object_name)))
+                if not subject_id or not object_id or subject_id == object_id:
+                    continue
+                create_edge_proposal(
+                    conn, project_id, subject_id, relation.replace(" ", "_"), object_id,
+                    owner_id=owner_id, properties={"extraction": "explicit_relation"},
+                    extraction_run_id=extraction_run_id, provenance=provenance, created_by=owner_id,
+                )
+                edges += 1
+        conn.execute("UPDATE graph_extraction_runs SET status = 'completed' WHERE extraction_run_id = ?", (extraction_run_id,))
+        audit.record(conn, project_id, "graph_extraction_completed", "graph_extraction_run", extraction_run_id, owner_id, {"proposals": proposals, "edges": edges})
+        conn.commit()
+    except Exception as exc:
+        conn.execute("UPDATE graph_extraction_runs SET status = 'failed', failure_reason = ? WHERE extraction_run_id = ?", (str(exc), extraction_run_id))
+        conn.commit()
+        raise
+    return {"extraction_run_id": extraction_run_id, "parser_run_id": parser_run_id, "status": "completed", "node_proposals": proposals, "edge_proposals": edges, "block_count": len(blocks)}
+
+
+def query_context(conn: Any, project_id: str, question: str, *, owner_id: str, limit: int = 8) -> list[dict[str, Any]]:
+    """Return accepted graph facts lexically relevant to a project question."""
+    _require_access(conn, project_id, owner_id)
+    terms = set(re.findall(r"[a-z0-9-]+", question.casefold()))
+    nodes = conn.execute(
+        """SELECT node_id, node_type, canonical_name, external_id, properties_json
+           FROM graph_nodes WHERE project_id = ? AND status IN ('accepted', 'edited')""", (project_id,)
+    ).fetchall()
+    relevant = {row[0]: row for row in nodes if terms & set(re.findall(r"[a-z0-9-]+", row[2].casefold()))}
+    if not relevant:
+        return []
+    edges = conn.execute(
+        """SELECT edge_id, subject_node_id, predicate, object_node_id, properties_json, confidence
+           FROM graph_edges WHERE project_id = ? AND status IN ('accepted', 'edited')
+           AND (subject_node_id IN ({}) OR object_node_id IN ({})) LIMIT ?""".format(
+               ",".join("?" for _ in relevant), ",".join("?" for _ in relevant)
+           ),
+        (project_id, *relevant, *relevant, min(max(limit, 1), 50)),
+    ).fetchall()
+    facts = []
+    for edge_id, subject_id, predicate, object_id, properties_json, confidence in edges:
+        subject = relevant.get(subject_id) or next((row for row in nodes if row[0] == subject_id), None)
+        object_node = relevant.get(object_id) or next((row for row in nodes if row[0] == object_id), None)
+        if subject is None or object_node is None:
+            continue
+        facts.append({"edge_id": edge_id, "subject": subject[2], "predicate": predicate, "object": object_node[2], "confidence": confidence, "properties": json.loads(properties_json)})
+    return facts

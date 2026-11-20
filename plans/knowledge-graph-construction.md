@@ -1,6 +1,6 @@
 # Knowledge Graph Construction Plan
 
-Status: proposed
+Status: implemented through deterministic extraction and hybrid project RAG; production browser verification remains a deployment gate.
 Owner: Biolab workspace
 Scope: project-scoped, evidence-backed scientific knowledge graph
 

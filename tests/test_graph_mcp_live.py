@@ -68,8 +68,8 @@ def _seed(db_path):
     )
     conn.execute(
         """INSERT INTO parsed_blocks
-           (block_id, parser_run_id, page_number, block_index, block_type, section_name, text, content_hash, created_at)
-           VALUES ('mcp-block', 'mcp-run', 1, 0, 'paragraph', 'results', 'KRAS activates MAPK.', 'mcp-hash', '2026-01-01T00:00:00Z')""",
+           (block_id, parser_run_id, page_number, block_index, block_type, section_name, text, review_state, content_hash, created_at)
+           VALUES ('mcp-block', 'mcp-run', 1, 0, 'paragraph', 'results', 'KRAS activates MAPK.', 'accepted', 'mcp-hash', '2026-01-01T00:00:00Z')""",
     )
     conn.commit()
     conn.close()
@@ -83,13 +83,15 @@ async def test_mcp_graph_propose_review_and_trace(tmp_path):
     async with _server(db_path) as url, streamable_http_client(url) as (read, write, _), ClientSession(read, write) as session:
         await session.initialize()
         source = [{"block_id": "mcp-block", "parser_run_id": "mcp-run", "page_number": 1, "content_hash": "mcp-hash", "excerpt": "KRAS activates MAPK."}]
+        extraction = await session.call_tool("extract_project_graph", {"project_id": project_id, "parser_run_id": "mcp-run"})
+        assert extraction.isError is False, extraction.content
         proposal = await session.call_tool("propose_graph_entity", {"project_id": project_id, "node_type": "gene", "canonical_name": "KRAS", "provenance": source})
         assert proposal.isError is False, proposal.content
         payload = json.loads(proposal.content[0].text)
         pending = await session.call_tool("list_graph_proposals", {"project_id": project_id, "status": "pending"})
-        assert len(json.loads(pending.content[0].text)["proposals"]) == 1
+        assert len(json.loads(pending.content[0].text)["proposals"]) >= 3
         stats = await session.call_tool("get_graph_stats", {"project_id": project_id})
-        assert json.loads(stats.content[0].text)["pending_proposals"] == 1
+        assert json.loads(stats.content[0].text)["pending_proposals"] >= 3
         trace = await session.call_tool("trace_graph_entity", {"project_id": project_id, "entity_id": payload["node_id"]})
         assert json.loads(trace.content[0].text)["provenance"][0]["block_id"] == "mcp-block"
 
