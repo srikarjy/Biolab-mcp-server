@@ -4,10 +4,9 @@ Biolab can run as a Python ASGI application on Vercel through `app.py`. The
 entrypoint reuses `biolab.server.create_hosted_app`, so MCP, REST, dashboard,
 and A2A routes share the same implementation.
 
-The deployment installs the optional Turso extra with `pip install ".[turso]"`.
-That makes the runtime capable of using Turso when the operator supplies the
-required environment variables; it does not create a database or configure
-credentials automatically.
+The deployment includes the `libsql` runtime driver. Turso is used only when
+the operator supplies the required environment variables; the package does not
+create a database or configure credentials automatically.
 
 The Vercel adapter defaults the database to `/tmp/biolab.db` and requires API
 authentication. Vercel filesystem storage is ephemeral; configure Turso
