@@ -361,14 +361,26 @@ def trace_entity(conn: Any, project_id: str, entity_id: str, *, owner_id: str) -
 
 def accepted_fingerprint(conn: Any, project_id: str, *, owner_id: str) -> str:
     _require_access(conn, project_id, owner_id)
-    rows = conn.execute(
-        """SELECT 'node', node_id, status, properties_json FROM graph_nodes WHERE project_id = ? AND status IN ('accepted', 'edited')
-           UNION ALL
-           SELECT 'edge', edge_id, status, properties_json FROM graph_edges WHERE project_id = ? AND status IN ('accepted', 'edited')
-           ORDER BY 1, 2""",
-        (project_id, project_id),
+    nodes = conn.execute(
+        """SELECT 'node', node_id, node_type, canonical_name, status, properties_json
+           FROM graph_nodes WHERE project_id = ? AND status IN ('accepted', 'edited')
+           ORDER BY node_id""", (project_id,)
     ).fetchall()
-    return _hash({"project_id": project_id, "graph_version": "v1", "records": rows})
+    edges = conn.execute(
+        """SELECT 'edge', edge_id, subject_node_id, predicate, object_node_id, status, properties_json
+           FROM graph_edges WHERE project_id = ? AND status IN ('accepted', 'edited')
+           ORDER BY edge_id""", (project_id,)
+    ).fetchall()
+    provenance = conn.execute(
+        """SELECT COALESCE(node_id, edge_id), content_hash, parser_version, extractor_version
+           FROM graph_provenance WHERE project_id = ? AND (node_id IS NOT NULL OR edge_id IS NOT NULL)
+           ORDER BY COALESCE(node_id, edge_id), provenance_id""", (project_id,)
+    ).fetchall()
+    return _hash({
+        "project_id": project_id, "graph_version": "v2", "ontology_version": "graph-v1",
+        "records": [list(row) for row in nodes] + [list(row) for row in edges],
+        "provenance": [list(row) for row in provenance],
+    })
 
 
 def stats(conn: Any, project_id: str, *, owner_id: str) -> dict[str, Any]:

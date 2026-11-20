@@ -1035,7 +1035,7 @@ async def project_rag_search(request: Request) -> JSONResponse:
             result["cached"] = False
             if result.get("status") == "active":
                 request.app.state.conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, question_key, question, json.dumps(result), result.get("embedding_model", rag.embedding_client.model_name()),))
-        audit.record(request.app.state.conn, project_id, "rag_queried", "project", project_id, auth.request_identity(request), {"question": question, "status": result.get("status", ""), "cached": bool(cached)})
+        audit.record(request.app.state.conn, project_id, "rag_queried", "project", project_id, auth.request_identity(request), {"question": question, "status": result.get("status", ""), "cached": bool(cached), "graph_edge_ids": [item.get("edge_id") for item in result.get("graph_context", [])]})
         workspace.record_query(request.app.state.conn, project_id, question, "search", bool(cached), result.get("status", ""), auth.request_identity(request))
         request.app.state.conn.commit()
     except (ValueError, TypeError, json.JSONDecodeError) as exc:
@@ -1077,7 +1077,7 @@ async def project_rag_answer(request: Request) -> JSONResponse:
                 request.app.state.conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, question_key, question, json.dumps(result), rag.embedding_client.model_name()))
         else:
             result["cached"] = True
-        audit.record(request.app.state.conn, project_id, "rag_answered", "project", project_id, owner_id, {"question": question, "grounded": result.get("grounded", False), "cached": bool(cached)})
+        audit.record(request.app.state.conn, project_id, "rag_answered", "project", project_id, owner_id, {"question": question, "grounded": result.get("grounded", False), "cached": bool(cached), "graph_edge_ids": [item.get("edge_id") for item in result.get("graph_context", [])]})
         workspace.record_query(request.app.state.conn, project_id, question, "answer", bool(cached), result.get("status", ""), owner_id)
         request.app.state.conn.commit()
     except (ValueError, TypeError, json.JSONDecodeError) as exc:

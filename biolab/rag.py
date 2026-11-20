@@ -152,7 +152,10 @@ class PgVectorStore:
     def upsert_parser_blocks(self, project_id: str, document_id: str, parser_run_id: str, blocks: list[dict[str, Any]]) -> int:
         """Vectorize page-aware parser blocks without mixing them with claims."""
         self.ensure_schema()
-        indexed_blocks = [block for block in blocks if str(block.get("text", "")).strip()]
+        indexed_blocks = [
+            block for block in blocks
+            if str(block.get("text", "")).strip() and str(block.get("review_state", "accepted")) in {"accepted", "edited"}
+        ]
         texts = [str(block["text"]).strip() for block in indexed_blocks]
         if not texts:
             return 0
@@ -269,8 +272,12 @@ def index_parser_blocks(project_id: str, document_id: str, parser_run_id: str, b
     """Index parser output when the optional embedding and pgvector services exist."""
     if not embedding_client.configured():
         return {"status": "disabled", "reason": "embedding provider not configured", "indexed_blocks": 0}
+    eligible_blocks = [
+        block for block in blocks
+        if str(block.get("review_state", "accepted")) in {"accepted", "edited"}
+    ]
     try:
-        count = PgVectorStore().upsert_parser_blocks(project_id, document_id, parser_run_id, blocks)
+        count = PgVectorStore().upsert_parser_blocks(project_id, document_id, parser_run_id, eligible_blocks)
     except RuntimeError as exc:
         return {"status": "disabled", "reason": str(exc), "indexed_blocks": 0}
     except Exception as exc:
