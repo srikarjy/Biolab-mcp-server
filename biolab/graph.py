@@ -52,7 +52,15 @@ def _require_provenance(provenance: list[dict[str, Any]] | None) -> list[dict[st
     return records
 
 
-def _insert_provenance(conn: Any, project_id: str, proposal_id: str, provenance: list[dict[str, Any]]) -> None:
+def _insert_provenance(
+    conn: Any,
+    project_id: str,
+    proposal_id: str,
+    provenance: list[dict[str, Any]],
+    *,
+    node_id: str | None = None,
+    edge_id: str | None = None,
+) -> None:
     for item in provenance:
         if item.get("block_id"):
             row = conn.execute(
@@ -86,6 +94,10 @@ def _insert_provenance(conn: Any, project_id: str, proposal_id: str, provenance:
                 item.get("excerpt", ""), item.get("parser_version", ""),
                 item.get("extractor_version", ""), _now(),
             ),
+        )
+        conn.execute(
+            "UPDATE graph_provenance SET node_id = COALESCE(node_id, ?), edge_id = COALESCE(edge_id, ?) WHERE proposal_id = ? AND node_id IS NULL AND edge_id IS NULL",
+            (node_id, edge_id, proposal_id),
         )
 
 
@@ -166,7 +178,7 @@ def create_node_proposal(
            VALUES (?, ?, 'node', ?, ?, ?, ?, 'pending', ?, ?)""",
         (proposal_id, project_id, node_id, extraction_run_id, _json(payload), payload_hash, created_by or owner_id, _now()),
     )
-    _insert_provenance(conn, project_id, proposal_id, sources)
+    _insert_provenance(conn, project_id, proposal_id, sources, node_id=node_id)
     audit.record(conn, project_id, "graph_node_proposed", "graph_proposal", proposal_id, created_by or owner_id, {"node_id": node_id})
     conn.commit()
     return _proposal_row(conn, proposal_id)  # type: ignore[return-value]
@@ -238,7 +250,7 @@ def create_edge_proposal(
            VALUES (?, ?, 'edge', ?, ?, ?, ?, 'pending', ?, ?)""",
         (proposal_id, project_id, edge_id, extraction_run_id, _json(payload), payload_hash, created_by or owner_id, _now()),
     )
-    _insert_provenance(conn, project_id, proposal_id, sources)
+    _insert_provenance(conn, project_id, proposal_id, sources, edge_id=edge_id)
     audit.record(conn, project_id, "graph_edge_proposed", "graph_proposal", proposal_id, created_by or owner_id, {"edge_id": edge_id})
     conn.commit()
     return _proposal_row(conn, proposal_id)  # type: ignore[return-value]

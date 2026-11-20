@@ -22,6 +22,7 @@ from biolab import (
     document_parser,
     evidence,
     exports,
+    graph,
     hf_parser,
     inference,
     rag,
@@ -79,6 +80,11 @@ OPENAPI_SCHEMA = {
             "post": {"summary": "Create a project"},
         },
         "/v1/projects/{project_id}/report": {"get": {"summary": "Export a project report as JSON, Markdown, or PDF"}},
+        "/v1/projects/{project_id}/graph/proposals": {"get": {"summary": "List graph proposals"}, "post": {"summary": "Create a provenance-backed graph proposal"}},
+        "/v1/projects/{project_id}/graph/proposals/{proposal_id}/review": {"post": {"summary": "Review a graph proposal"}},
+        "/v1/projects/{project_id}/graph/nodes/{node_id}/expand": {"get": {"summary": "Expand an accepted graph node"}},
+        "/v1/projects/{project_id}/graph/entities/{entity_id}/trace": {"get": {"summary": "Trace graph provenance"}},
+        "/v1/projects/{project_id}/graph/stats": {"get": {"summary": "Get graph counts and fingerprint"}},
         "/v1/projects/{project_id}/save-reviewed": {"post": {"summary": "Save accepted ranking candidates to project evidence"}},
         "/v1/collections": {
             "get": {"summary": "List evidence collections"},
@@ -121,6 +127,7 @@ PROJECT_PAGE_HTML = r"""<!doctype html>
     <section class="panel"><h2>Selected MCP papers</h2><p class="sub">These are preserved retrievals selected from the evidence search page. Parsing uses the saved record; there is no upload step.</p><div id="papers" class="list"><div class="empty">Loading selected papers…</div></div></section>
   <section class="panel"><h2>Query the paper RAG</h2><p class="sub">Answers use only reviewed parser blocks and show their citations.</p><form id="query-form" class="query"><input id="question" required placeholder="What does this paper report about KRAS?"><button>Ask grounded question</button></form><div id="rag" class="list"><div class="empty">Ask a question after indexing reviewed blocks.</div></div><div id="notes" class="list"></div></section>
     <section class="panel wide"><h2>Parsed papers and review gate</h2><p class="sub">Inspect parser blocks, accept useful passages for the RAG, or exclude them.</p><div id="runs" class="list"><div class="empty">Loading parser runs…</div></div></section>
+    <section class="panel wide"><h2>Knowledge graph review</h2><p class="sub">Graph facts are proposals until a human accepts them. Accepted relationships are the only ones visible to graph expansion.</p><div id="graph-stats" class="meta">Loading graph status…</div><div id="graph-proposals" class="list"><div class="empty">No graph proposals yet.</div></div></section>
   </div>
 </main>
 <script>
@@ -129,16 +136,18 @@ const $=id=>document.getElementById(id);
 const esc=value=>String(value??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 async function api(path,options){const r=await fetch(path,options);const d=await r.json();if(!r.ok)throw Error(d.error||('Request failed '+r.status));return d}
 async function load(){
-  try{const report=await api('/v1/projects/'+encodeURIComponent(projectId)+'/report');const p=report.project||{};$('title').textContent=p.name||'Project workspace';$('description').textContent=p.description||'Selected scientific evidence, parser review, and paper-grounded retrieval.';const c=await api('/v1/projects/'+encodeURIComponent(projectId)+'/context');$('context').textContent=[c.objective&&'Objective: '+c.objective,c.research_question&&'Question: '+c.research_question,c.scope&&'Scope: '+c.scope].filter(Boolean).join(' · ')||'No research context saved yet.';await Promise.all([papers(),runs(),notes()]);}
+  try{const report=await api('/v1/projects/'+encodeURIComponent(projectId)+'/report');const p=report.project||{};$('title').textContent=p.name||'Project workspace';$('description').textContent=p.description||'Selected scientific evidence, parser review, and paper-grounded retrieval.';const c=await api('/v1/projects/'+encodeURIComponent(projectId)+'/context');$('context').textContent=[c.objective&&'Objective: '+c.objective,c.research_question&&'Question: '+c.research_question,c.scope&&'Scope: '+c.scope].filter(Boolean).join(' · ')||'No research context saved yet.';await Promise.all([papers(),runs(),notes(),graphReview()]);}
   catch(e){$('description').innerHTML='<span class="error">'+esc(e.message)+'</span>'}
 }
 async function papers(){const d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/retrievals');const rows=d.retrievals||[];$('papers').innerHTML=rows.length?rows.map(x=>{const s=x.snapshot||{};return '<article class="item"><strong>'+esc(s.title||s.name||x.external_id)+'</strong><span class="meta">'+esc(x.source)+' · '+esc(x.external_id)+'</span><div class="actions"><button data-parse="'+esc(x.retrieval_id)+'">Parse saved paper</button></div></article>'}).join(''):'<div class="empty">No papers selected yet. Return to evidence search and select a preserved result.</div>'}
 async function runs(){const d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/parser-runs');const rows=d.parser_runs||[];$('runs').innerHTML=rows.length?rows.map(x=>'<article class="item" data-run="'+esc(x.parser_run_id)+'"><strong>'+esc(x.title||x.source_name||'Parsed paper')+'</strong><span class="meta">'+esc(x.status||x.review_state||'parsed')+' · '+esc(x.parser_run_id)+'</span><div class="actions"><button class="secondary" data-inspect="'+esc(x.parser_run_id)+'">Inspect blocks</button></div><div class="blocks"></div></article>').join(''):'<div class="empty">No parsed papers yet. Parse one of the selected papers above.</div>'}
 async function notes(){const d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/rag/notes');const rows=d.notes||[];$('notes').innerHTML=rows.length?'<h3>Saved notes</h3>'+rows.map(x=>'<article class="item"><strong>'+esc(x.note_text)+'</strong><span class="meta">'+esc(x.question||'Saved from RAG')}</span></article>').join(''):''}
-document.addEventListener('click',async e=>{const parse=e.target.closest('[data-parse]'),inspect=e.target.closest('[data-inspect]'),review=e.target.closest('[data-review]');try{
+async function graphReview(){const [s,p]=await Promise.all([api('/v1/projects/'+encodeURIComponent(projectId)+'/graph/stats'),api('/v1/projects/'+encodeURIComponent(projectId)+'/graph/proposals?status=pending')]);$('graph-stats').textContent=s.graph_proposals+' proposals · '+s.graph_nodes+' nodes · '+s.graph_edges+' edges · '+s.pending_proposals+' awaiting review';$('graph-proposals').innerHTML=(p.proposals||[]).map(x=>'<article class="item"><strong>'+esc(x.proposal_type)+' proposal · '+esc(x.payload.canonical_name||x.payload.predicate||x.proposal_id)+'</strong><span class="meta">Pending human review · provenance attached</span><div class="actions"><button data-graph-review="accepted" data-proposal="'+esc(x.proposal_id)+'">Accept</button><button class="secondary" data-graph-review="rejected" data-proposal="'+esc(x.proposal_id)+'">Reject</button><button class="secondary" data-graph-review="deferred" data-proposal="'+esc(x.proposal_id)+'">Defer</button></div></article>').join('')||'<div class="empty">No pending graph proposals. Extraction will place source-backed facts here.</div>'}
+document.addEventListener('click',async e=>{const parse=e.target.closest('[data-parse]'),inspect=e.target.closest('[data-inspect]'),review=e.target.closest('[data-review]'),graphReviewButton=e.target.closest('[data-graph-review]');try{
   if(parse){parse.disabled=true;await api('/v1/projects/'+encodeURIComponent(projectId)+'/retrievals/'+encodeURIComponent(parse.dataset.parse)+'/parse',{method:'POST'});await runs()}
   if(inspect){const run=inspect.closest('[data-run]'),d=await api('/v1/parser/runs/'+encodeURIComponent(inspect.dataset.inspect));run.querySelector('.blocks').innerHTML=(d.blocks||[]).map(b=>'<div class="chunk"><strong>Page '+esc(b.page_number)+' · '+esc(b.section_name)+' · '+esc(b.review_state)+'</strong><br>'+esc(b.text)+'<div class="actions"><button class="secondary" data-review="accepted" data-run="'+esc(b.parser_run_id)+'" data-block="'+esc(b.block_id)+'">Accept for RAG</button><button class="secondary" data-review="excluded" data-run="'+esc(b.parser_run_id)+'" data-block="'+esc(b.block_id)+'">Exclude</button></div></div>').join('')||'<div class="empty">No blocks.</div>'}
   if(review){review.disabled=true;await api('/v1/parser/runs/'+encodeURIComponent(review.dataset.run)+'/blocks/'+encodeURIComponent(review.dataset.block)+'/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({review_state:review.dataset.review})});review.textContent='Saved';}
+  if(graphReviewButton){graphReviewButton.disabled=true;await api('/v1/projects/'+encodeURIComponent(projectId)+'/graph/proposals/'+encodeURIComponent(graphReviewButton.dataset.proposal)+'/review',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({decision:graphReviewButton.dataset.graphReview,reviewer_role:'owner'})});await graphReview()}
 }catch(e){alert(e.message)}});
 $('query-form').addEventListener('submit',async e=>{e.preventDefault();$('rag').innerHTML='<div class="empty">Searching reviewed evidence…</div>';try{const q=$('question').value.trim(),d=await api('/v1/projects/'+encodeURIComponent(projectId)+'/rag/answer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,top_k:8})});if(d.status==='disabled'){$('rag').innerHTML='<div class="empty">RAG is not active: '+esc(d.reason)+'</div>';return}const answer=d.grounded?'<article class="item"><strong>Grounded answer</strong>'+esc(d.answer)+'<div class="meta">'+(d.citations||[]).map(c=>'Page '+esc(c.page_number)+' · '+esc(c.section_name)+' · '+esc(c.content_hash)).join(' | ')+'</div></article>':'<div class="empty">'+esc(d.answer||'No supported answer.')+'</div>';const passages=(d.chunks||[]).map(x=>'<article class="chunk"><strong>Supporting passage · Page '+esc(x.page_number)+' · '+esc(x.section_name)+'</strong><br>'+esc(x.chunk_text)+'</article>').join('');$('rag').innerHTML=answer+passages}catch(e){$('rag').innerHTML='<div class="empty error">'+esc(e.message)+'</div>'}});
 load();
@@ -1158,6 +1167,85 @@ async def project_audit(request: Request) -> JSONResponse:
     return JSONResponse({"project_id": project_id, "valid": valid, "event_count": len(events), "first_broken_event_id": broken_id, "events": events}, status_code=200 if valid else 409)
 
 
+async def project_graph_proposals(request: Request) -> JSONResponse:
+    project_id = request.path_params["project_id"]
+    owner_id = auth.request_identity(request)
+    try:
+        if request.method == "GET":
+            return JSONResponse({"proposals": graph.list_proposals(
+                request.app.state.conn, project_id, owner_id=owner_id,
+                status=request.query_params.get("status"),
+                limit=int(request.query_params.get("limit", "100")),
+            )})
+        payload = await request.json()
+        provenance = payload.get("provenance")
+        if payload.get("proposal_type", "node") == "edge":
+            proposal = graph.create_edge_proposal(
+                request.app.state.conn, project_id,
+                str(payload.get("subject_node_id", "")), str(payload.get("predicate", "")),
+                str(payload.get("object_node_id", "")), owner_id=owner_id,
+                properties=payload.get("properties") or {}, confidence=payload.get("confidence"),
+                extraction_run_id=payload.get("extraction_run_id"), provenance=provenance,
+                created_by=owner_id,
+            )
+        else:
+            proposal = graph.create_node_proposal(
+                request.app.state.conn, project_id, str(payload.get("node_type", "")),
+                str(payload.get("canonical_name", "")), owner_id=owner_id,
+                namespace=str(payload.get("namespace", "")), external_id=str(payload.get("external_id", "")),
+                properties=payload.get("properties") or {}, extraction_run_id=payload.get("extraction_run_id"),
+                provenance=provenance, created_by=owner_id,
+            )
+        return JSONResponse(proposal, status_code=201)
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+
+
+async def project_graph_review(request: Request) -> JSONResponse:
+    try:
+        payload = await request.json()
+        result = graph.review_proposal(
+            request.app.state.conn, request.path_params["proposal_id"],
+            owner_id=auth.request_identity(request), decision=str(payload.get("decision", "")),
+            reviewer_role=str(payload.get("reviewer_role", "owner")),
+            reason=str(payload.get("reason", "")), edited_value=payload.get("edited_value") or {},
+        )
+    except (AttributeError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        status = 404 if "not found" in str(exc) else 400
+        return JSONResponse({"error": str(exc)}, status_code=status)
+    return JSONResponse(result)
+
+
+async def project_graph_expand(request: Request) -> JSONResponse:
+    try:
+        result = graph.expand_node(
+            request.app.state.conn, request.path_params["project_id"], request.path_params["node_id"],
+            owner_id=auth.request_identity(request), limit=int(request.query_params.get("limit", "50")),
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    return JSONResponse(result)
+
+
+async def project_graph_trace(request: Request) -> JSONResponse:
+    try:
+        result = graph.trace_entity(
+            request.app.state.conn, request.path_params["project_id"], request.path_params["entity_id"],
+            owner_id=auth.request_identity(request),
+        )
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    return JSONResponse({"provenance": result})
+
+
+async def project_graph_stats(request: Request) -> JSONResponse:
+    try:
+        result = graph.stats(request.app.state.conn, request.path_params["project_id"], owner_id=auth.request_identity(request))
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=404)
+    return JSONResponse(result)
+
+
 async def project_context(request: Request) -> JSONResponse:
     project_id = request.path_params["project_id"]
     owner_id = auth.request_identity(request)
@@ -1446,6 +1534,11 @@ def api_routes() -> list[Route]:
         Route("/v1/projects", projects, methods=["GET", "POST"]),
         Route("/v1/projects/{project_id}/report", project_report),
         Route("/v1/projects/{project_id}/audit", project_audit),
+        Route("/v1/projects/{project_id}/graph/proposals", project_graph_proposals, methods=["GET", "POST"]),
+        Route("/v1/projects/{project_id}/graph/proposals/{proposal_id}/review", project_graph_review, methods=["POST"]),
+        Route("/v1/projects/{project_id}/graph/nodes/{node_id}/expand", project_graph_expand),
+        Route("/v1/projects/{project_id}/graph/entities/{entity_id}/trace", project_graph_trace),
+        Route("/v1/projects/{project_id}/graph/stats", project_graph_stats),
         Route("/v1/projects/{project_id}/context", project_context, methods=["GET", "PATCH"]),
         Route("/v1/projects/{project_id}/query-history", project_query_history),
         Route("/v1/projects/{project_id}/save-reviewed", save_reviewed_project_evidence, methods=["POST"]),
