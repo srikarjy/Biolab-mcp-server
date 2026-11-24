@@ -14,9 +14,13 @@ def test_dashboard_and_health(tmp_path):
         schema = client.get("/openapi.json")
         metrics = client.get("/metrics")
         storage = client.get("/v1/storage")
+        project = client.post("/v1/projects", json={"name": "Audit UI"}).json()
+        project_page = client.get(f"/projects/{project['project_id']}")
 
     assert page.status_code == 200
     assert "Biolab Evidence Workspace" in page.text
+    assert project_page.status_code == 200
+    assert "Verify project audit" in project_page.text
     assert health.json() == {"status": "ok", "service": "biolab"}
     assert schema.json()["info"]["version"] == "0.5.0"
     assert metrics.json()["audit_chain_valid"] is True
