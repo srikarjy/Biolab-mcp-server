@@ -143,6 +143,7 @@ def test_three_paper_project_rag_download_and_audit_workflow(monkeypatch, tmp_pa
         second = client.post(answer_path, json={"question": "What changed?"})
         history = client.get(f"/v1/projects/{project['project_id']}/query-history")
         audit_result = client.get(f"/v1/projects/{project['project_id']}/audit")
+        audit_export = client.post(f"/v1/projects/{project['project_id']}/audit/export")
         report = client.get(f"/v1/projects/{project['project_id']}/report").json()
         downloads = [client.get(f"/v1/parser/runs/{run['parser_run_id']}/download") for run in runs]
 
@@ -150,6 +151,9 @@ def test_three_paper_project_rag_download_and_audit_workflow(monkeypatch, tmp_pa
     assert second.json()["cached"] is True
     assert len(history.json()["queries"]) == 2
     assert audit_result.json()["valid"] is True
+    assert audit_export.status_code == 200
+    assert audit_export.json()["valid"] is True
+    assert audit_export.headers["content-disposition"].endswith(f'"{project["project_id"]}.audit.json"')
     assert len(report["papers"]) == 3 and len(report["parser_runs"]) == 3
     assert all(download.status_code == 200 for download in downloads)
 

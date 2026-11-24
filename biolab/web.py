@@ -111,6 +111,7 @@ OPENAPI_SCHEMA = {
             "post": {"summary": "Create a project"},
         },
         "/v1/projects/{project_id}/report": {"get": {"summary": "Export a project report as JSON, Markdown, or PDF"}},
+        "/v1/projects/{project_id}/audit/export": {"post": {"summary": "Export the verified project audit ledger"}},
         "/v1/projects/{project_id}/graph/proposals": {"get": {"summary": "List graph proposals"}, "post": {"summary": "Create a provenance-backed graph proposal"}},
         "/v1/projects/{project_id}/graph/proposals/{proposal_id}/review": {"post": {"summary": "Review a graph proposal"}},
         "/v1/projects/{project_id}/graph/nodes/{node_id}/expand": {"get": {"summary": "Expand an accepted graph node"}},
@@ -1140,6 +1141,17 @@ async def parser_download(request: Request) -> Response:
         result = document_parser.assert_run_access(request.app.state.conn, request.path_params["parser_run_id"], auth.request_identity(request))
     except ValueError:
         return JSONResponse({"error": "parser run not found"}, status_code=404)
+    if result.get("project_id"):
+        audit.record(
+            request.app.state.conn,
+            result["project_id"],
+            "parser_downloaded",
+            "parser_run",
+            request.path_params["parser_run_id"],
+            auth.request_identity(request),
+            {"filename": result.get("filename", "")},
+        )
+        request.app.state.conn.commit()
     payload = json.dumps(result, indent=2, sort_keys=True).encode("utf-8")
     filename = result["filename"].rsplit(".", 1)[0] + ".parsed.json"
     return Response(payload, media_type="application/json", headers={"Content-Disposition": f'attachment; filename="{filename}"'})
@@ -1202,6 +1214,47 @@ async def project_audit(request: Request) -> JSONResponse:
     valid, broken_id = audit.verify_project(request.app.state.conn, project_id)
     events = audit.list_events(request.app.state.conn, project_id)
     return JSONResponse({"project_id": project_id, "valid": valid, "event_count": len(events), "first_broken_event_id": broken_id, "events": events}, status_code=200 if valid else 409)
+
+
+async def project_audit_export(request: Request) -> Response:
+    project_id = request.path_params["project_id"]
+    owner_id = auth.request_identity(request)
+    if not workspace.has_project_access(request.app.state.conn, project_id, owner_id):
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    valid, broken_id = audit.verify_project(request.app.state.conn, project_id)
+    if not valid:
+        return JSONResponse(
+            {"project_id": project_id, "valid": False, "first_broken_event_id": broken_id},
+            status_code=409,
+        )
+    event = audit.record(
+        request.app.state.conn,
+        project_id,
+        "audit_exported",
+        "project",
+        project_id,
+        owner_id,
+        {"format": "json"},
+    )
+    request.app.state.conn.commit()
+    valid, broken_id = audit.verify_project(request.app.state.conn, project_id)
+    payload = json.dumps(
+        {
+            "project_id": project_id,
+            "valid": valid,
+            "event_count": len(audit.list_events(request.app.state.conn, project_id)),
+            "first_broken_event_id": broken_id,
+            "export_event_id": event["event_id"],
+            "events": audit.list_events(request.app.state.conn, project_id),
+        },
+        indent=2,
+        sort_keys=True,
+    ).encode("utf-8")
+    return Response(
+        payload,
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{project_id}.audit.json"'},
+    )
 
 
 async def project_graph_proposals(request: Request) -> JSONResponse:
@@ -1664,6 +1717,7 @@ def api_routes() -> list[Route]:
         Route("/v1/projects", projects, methods=["GET", "POST"]),
         Route("/v1/projects/{project_id}/report", project_report),
         Route("/v1/projects/{project_id}/audit", project_audit),
+        Route("/v1/projects/{project_id}/audit/export", project_audit_export, methods=["POST"]),
         Route("/v1/projects/{project_id}/graph/proposals", project_graph_proposals, methods=["GET", "POST"]),
         Route("/v1/projects/{project_id}/graph/proposals/{proposal_id}/review", project_graph_review, methods=["POST"]),
         Route("/v1/projects/{project_id}/graph/nodes/{node_id}/expand", project_graph_expand),
