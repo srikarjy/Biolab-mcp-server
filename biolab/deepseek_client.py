@@ -1,4 +1,4 @@
-"""DeepSeek-compatible grounded generation client.
+"""OpenAI-compatible grounded generation client for DeepSeek or NVIDIA.
 
 The client uses the OpenAI-compatible chat-completions wire format without
 adding an SDK dependency. It never logs the API key or source payload.
@@ -13,16 +13,21 @@ from urllib import request
 
 
 def configured() -> bool:
-    return bool(os.environ.get("DEEPSEEK_API_KEY"))
+    return bool(os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("NVIDIA_API_KEY"))
 
 
 def generate_grounded_claims(question: str, evidence: list[dict[str, Any]], max_insights: int = 10) -> dict[str, Any]:
     """Ask DeepSeek for claims whose citations must point to evidence block IDs."""
-    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    provider = "deepseek" if os.environ.get("DEEPSEEK_API_KEY") else "nvidia"
+    api_key = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("NVIDIA_API_KEY")
     if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY is not configured")
-    base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+        raise RuntimeError("DEEPSEEK_API_KEY or NVIDIA_API_KEY is not configured")
+    if provider == "nvidia":
+        base_url = os.environ.get("NVIDIA_INFERENCE_BASE_URL", "https://integrate.api.nvidia.com/v1").rstrip("/")
+        model = os.environ.get("NVIDIA_INFERENCE_MODEL", "nvidia/nemotron-3.5-bolt-e4b")
+    else:
+        base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+        model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
     blocks = []
     for index, item in enumerate(evidence, 1):
         snapshot = item["snapshot"]
@@ -64,4 +69,4 @@ def generate_grounded_claims(question: str, evidence: list[dict[str, Any]], max_
     insights = parsed.get("insights", [])
     if not isinstance(insights, list):
         raise TypeError("DeepSeek returned an invalid insights object")
-    return {"model_provider": "deepseek", "model_name": model, "insights": insights[:max_insights]}
+    return {"model_provider": provider, "model_name": model, "insights": insights[:max_insights]}

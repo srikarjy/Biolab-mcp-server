@@ -10,6 +10,15 @@ def test_verify_api_key_accepts_a_freshly_created_key(tmp_path):
     assert auth.verify_api_key(conn, raw_key) == "user:alice"
 
 
+def test_verify_api_key_accepts_opt_in_bootstrap_key(monkeypatch, tmp_path):
+    conn = db.connect(str(tmp_path / "auth.db"))
+    monkeypatch.setenv("BIOLAB_BOOTSTRAP_API_KEY", "bootstrap-secret")
+    monkeypatch.setenv("BIOLAB_BOOTSTRAP_AGENT_ID", "demo-user")
+
+    assert auth.verify_api_key(conn, "bootstrap-secret") == "demo-user"
+    assert auth.verify_api_key(conn, "wrong-secret") is None
+
+
 def test_verify_api_key_rejects_an_unknown_key(tmp_path):
     conn = db.connect(str(tmp_path / "test.db"))
     assert auth.verify_api_key(conn, "blk_not-a-real-key") is None

@@ -58,6 +58,19 @@ CREATE TABLE IF NOT EXISTS api_keys (
     revoked     INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    actor_id         TEXT NOT NULL,
+    idempotency_key  TEXT NOT NULL,
+    method           TEXT NOT NULL,
+    path             TEXT NOT NULL,
+    request_hash     TEXT NOT NULL,
+    status_code      INTEGER NOT NULL,
+    response_headers TEXT NOT NULL,
+    response_body    BLOB NOT NULL,
+    created_at       TEXT NOT NULL,
+    PRIMARY KEY (actor_id, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS projects (
     project_id   TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
@@ -302,6 +315,152 @@ CREATE TABLE IF NOT EXISTS parsed_blocks (
     FOREIGN KEY (parser_run_id) REFERENCES parser_runs(parser_run_id)
 );
 CREATE INDEX IF NOT EXISTS idx_parsed_blocks_run ON parsed_blocks(parser_run_id, page_number, block_index);
+
+CREATE TABLE IF NOT EXISTS graph_extraction_runs (
+    extraction_run_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    parser_run_id TEXT,
+    extractor_type TEXT NOT NULL,
+    extractor_version TEXT NOT NULL,
+    input_block_hashes TEXT NOT NULL DEFAULT '[]',
+    output_schema_version TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'completed', 'failed')),
+    failure_reason TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    UNIQUE (project_id, extraction_run_id),
+    FOREIGN KEY (project_id) REFERENCES projects(project_id),
+    FOREIGN KEY (parser_run_id) REFERENCES parser_runs(parser_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_graph_extraction_project ON graph_extraction_runs(project_id, created_at);
+
+CREATE TABLE IF NOT EXISTS graph_nodes (
+    node_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    node_type TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT '',
+    canonical_name TEXT NOT NULL,
+    normalized_name TEXT NOT NULL,
+    external_id TEXT NOT NULL DEFAULT '',
+    properties_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'edited', 'rejected', 'deferred', 'superseded', 'stale')),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (project_id, node_id),
+    UNIQUE (project_id, node_type, namespace, normalized_name, external_id),
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_graph_nodes_project ON graph_nodes(project_id, status);
+CREATE INDEX IF NOT EXISTS idx_graph_nodes_name ON graph_nodes(project_id, node_type, normalized_name);
+
+CREATE TABLE IF NOT EXISTS graph_edges (
+    edge_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    subject_node_id TEXT NOT NULL,
+    predicate TEXT NOT NULL,
+    object_node_id TEXT NOT NULL,
+    properties_json TEXT NOT NULL DEFAULT '{}',
+    confidence REAL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'edited', 'rejected', 'deferred', 'superseded', 'stale')),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (project_id, edge_id),
+    UNIQUE (project_id, subject_node_id, predicate, object_node_id),
+    FOREIGN KEY (project_id) REFERENCES projects(project_id),
+    FOREIGN KEY (project_id, subject_node_id) REFERENCES graph_nodes(project_id, node_id),
+    FOREIGN KEY (project_id, object_node_id) REFERENCES graph_nodes(project_id, node_id),
+    CHECK (subject_node_id <> object_node_id)
+);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_project ON graph_edges(project_id, status);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_subject ON graph_edges(project_id, subject_node_id, predicate);
+CREATE INDEX IF NOT EXISTS idx_graph_edges_object ON graph_edges(project_id, object_node_id, predicate);
+
+CREATE TABLE IF NOT EXISTS graph_proposals (
+    proposal_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    proposal_type TEXT NOT NULL CHECK (proposal_type IN ('node', 'edge')),
+    node_id TEXT,
+    edge_id TEXT,
+    extraction_run_id TEXT,
+    payload_json TEXT NOT NULL,
+    payload_hash TEXT NOT NULL,
+    proposal_version INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'accepted', 'edited', 'rejected', 'deferred', 'superseded')),
+    created_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE (project_id, proposal_id),
+    CHECK ((proposal_type = 'node' AND node_id IS NOT NULL AND edge_id IS NULL) OR
+           (proposal_type = 'edge' AND edge_id IS NOT NULL AND node_id IS NULL)),
+    FOREIGN KEY (project_id) REFERENCES projects(project_id),
+    FOREIGN KEY (project_id, node_id) REFERENCES graph_nodes(project_id, node_id),
+    FOREIGN KEY (project_id, edge_id) REFERENCES graph_edges(project_id, edge_id),
+    FOREIGN KEY (extraction_run_id) REFERENCES graph_extraction_runs(extraction_run_id)
+);
+CREATE INDEX IF NOT EXISTS idx_graph_proposals_project ON graph_proposals(project_id, status, created_at);
+CREATE INDEX IF NOT EXISTS idx_graph_proposals_entity ON graph_proposals(node_id, edge_id);
+
+CREATE TABLE IF NOT EXISTS graph_provenance (
+    provenance_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    proposal_id TEXT,
+    node_id TEXT,
+    edge_id TEXT,
+    retrieval_id TEXT,
+    parser_run_id TEXT,
+    block_id TEXT,
+    page_number INTEGER,
+    locator_json TEXT NOT NULL DEFAULT '{}',
+    content_hash TEXT NOT NULL,
+    excerpt TEXT NOT NULL DEFAULT '',
+    parser_version TEXT NOT NULL DEFAULT '',
+    extractor_version TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    CHECK (retrieval_id IS NOT NULL OR block_id IS NOT NULL),
+    CHECK ((node_id IS NOT NULL) OR (edge_id IS NOT NULL) OR (proposal_id IS NOT NULL)),
+    FOREIGN KEY (project_id) REFERENCES projects(project_id),
+    FOREIGN KEY (project_id, proposal_id) REFERENCES graph_proposals(project_id, proposal_id),
+    FOREIGN KEY (project_id, node_id) REFERENCES graph_nodes(project_id, node_id),
+    FOREIGN KEY (project_id, edge_id) REFERENCES graph_edges(project_id, edge_id),
+    FOREIGN KEY (retrieval_id) REFERENCES retrievals(retrieval_id),
+    FOREIGN KEY (parser_run_id) REFERENCES parser_runs(parser_run_id),
+    FOREIGN KEY (block_id) REFERENCES parsed_blocks(block_id)
+);
+CREATE INDEX IF NOT EXISTS idx_graph_provenance_project ON graph_provenance(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_graph_provenance_entity ON graph_provenance(node_id, edge_id, proposal_id);
+
+CREATE TABLE IF NOT EXISTS graph_reviews (
+    review_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    proposal_id TEXT NOT NULL,
+    decision TEXT NOT NULL CHECK (decision IN ('accepted', 'edited', 'rejected', 'deferred')),
+    edited_value_json TEXT NOT NULL DEFAULT '',
+    reviewer_id TEXT NOT NULL,
+    reviewer_role TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    decision_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id),
+    FOREIGN KEY (project_id, proposal_id) REFERENCES graph_proposals(project_id, proposal_id)
+);
+CREATE INDEX IF NOT EXISTS idx_graph_reviews_proposal ON graph_reviews(proposal_id, created_at);
+
+CREATE TABLE IF NOT EXISTS graph_index_outbox (
+    outbox_id TEXT PRIMARY KEY,
+    project_id TEXT NOT NULL,
+    proposal_id TEXT,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    target TEXT NOT NULL CHECK (target IN ('neon_pgvector')),
+    state TEXT NOT NULL CHECK (state IN ('pending_index', 'indexed', 'index_failed', 'stale')),
+    idempotency_key TEXT NOT NULL UNIQUE,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE (project_id, outbox_id),
+    FOREIGN KEY (project_id) REFERENCES projects(project_id),
+    FOREIGN KEY (project_id, proposal_id) REFERENCES graph_proposals(project_id, proposal_id)
+);
+CREATE INDEX IF NOT EXISTS idx_graph_outbox_pending ON graph_index_outbox(state, updated_at);
 """
 
 # Tracks the target (Turso URL or local path) most recently connected to, so
@@ -420,6 +579,7 @@ def connect(db_path: str) -> Any:
     target, token = resolve_target(db_path)
 
     conn = open_connection(target, token)
+    conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA_V2)
     _upgrade_retrievals(conn)
     _upgrade_projects(conn)

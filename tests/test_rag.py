@@ -12,6 +12,16 @@ def test_query_key_changes_when_corpus_or_embedding_changes():
     assert rag.query_key("What changed?", 5, corpus_fingerprint="corpus-1", embedding_fingerprint="embed-2") != base
 
 
+def test_query_key_changes_when_project_context_changes():
+    first = rag.query_key("What changed?", 5, context_fingerprint="context-1")
+    assert rag.query_key("What changed?", 5, context_fingerprint="context-2") != first
+
+
+def test_query_key_changes_when_accepted_graph_changes():
+    first = rag.query_key("What changed?", 5, context_fingerprint="context:graph-1")
+    assert rag.query_key("What changed?", 5, context_fingerprint="context:graph-2") != first
+
+
 class FakeVectorStore:
     indexed: list[dict] = []
     search_args: tuple = ()
@@ -58,6 +68,29 @@ def test_project_parser_indexing_is_active_and_stable(monkeypatch):
     assert result == {"status": "active", "indexed_blocks": 1}
     assert FakeVectorStore.indexed[0]["block_id"] == "block-1"
     assert FakeVectorStore.indexed[0]["section_name"] == "results"
+
+
+def test_project_parser_indexing_excludes_pending_blocks(monkeypatch):
+    FakeVectorStore.indexed = []
+    monkeypatch.setattr(rag.embedding_client, "configured", lambda: True)
+    monkeypatch.setattr(rag, "PgVectorStore", FakeVectorStore)
+
+    result = rag.index_parser_blocks(
+        "project-1", "document-1", "run-1",
+        [
+            {"block_id": "accepted", "page_number": 1, "block_type": "paragraph", "text": "Keep", "review_state": "accepted"},
+            {"block_id": "pending", "page_number": 2, "block_type": "paragraph", "text": "Do not index", "review_state": "pending"},
+        ],
+    )
+
+    assert result == {"status": "active", "indexed_blocks": 1}
+    assert [item["block_id"] for item in FakeVectorStore.indexed] == ["accepted"]
+
+
+def test_search_returns_explicit_disabled_state_without_embeddings(monkeypatch):
+    monkeypatch.setattr(rag.embedding_client, "configured", lambda: False)
+    result = rag.search_parser_context("project-1", "What changed?")
+    assert result == {"status": "disabled", "reason": "embedding provider not configured", "chunks": []}
 
 
 def test_project_parser_search_preserves_scope_and_section_filter(monkeypatch):

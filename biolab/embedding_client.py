@@ -119,7 +119,7 @@ def _local_embed(texts: list[str]) -> list[list[float]]:
     return vectors.tolist()
 
 
-def embed(texts: list[str]) -> list[list[float]]:
+def embed(texts: list[str], input_type: str | None = None) -> list[list[float]]:
     if not texts:
         return []
     selected = provider()
@@ -142,7 +142,12 @@ def embed(texts: list[str]) -> list[list[float]]:
     vectors: list[list[float]] = []
     for start in range(0, len(texts), batch_size):
         batch = texts[start:start + batch_size]
-        payload = json.dumps({"model": model, "input": batch}).encode()
+        payload_data = {"model": model, "input": batch}
+        if selected == "nvidia" and input_type:
+            payload_data["input_type"] = input_type
+        if selected == "nvidia":
+            payload_data["encoding_format"] = "float"
+        payload = json.dumps(payload_data).encode()
         req = request.Request(
             endpoint, data=payload,
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},

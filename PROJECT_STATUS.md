@@ -39,8 +39,8 @@ it does not validate scientific conclusions or provide clinical advice.
 - Server-side JSON/Markdown/PDF report exports with SHA-256 checksums and export
   records, plus A2A dispatch for ranking, grounded insights, and project reports.
 - Project owner and organization-member schema with service-layer project
-  listing/report checks; hosted multi-organization deployment still requires
-  authenticated keys and durable Turso storage.
+  listing/report checks; hosted multi-organization deployment uses authenticated
+  keys and durable Turso storage.
 - Atomic reviewed-evidence save path from ranking candidates into a project
   collection; unreviewed candidates are rejected unless an explicit override
   note is supplied.
@@ -91,8 +91,9 @@ scientist / Codex / ChatGPT / BioClaw / another agent
 - Remote hosting is optional. One process serves `/mcp`, `/v1/*`, `/`, and health.
 - SQLite remains the default because it is free and portable. A mounted volume is
   required in containers. libSQL/Turso support remains available for remote use.
-- The public Vercel demo currently uses ephemeral `/tmp` storage and anonymous
-  access; it is not a durable or private production deployment.
+- The Vercel deployment requires an authenticated API key and now uses Turso for
+  durable metadata plus Neon pgvector for durable accepted RAG vectors. `/tmp`
+  remains temporary scratch space only.
 - Retrievals are append-only events. Re-fetching the same external identifier
   creates another record because source content and retrieval time can differ.
 - Biolab records evidence and explicit assessments; it does not silently rank a

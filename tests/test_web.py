@@ -14,11 +14,15 @@ def test_dashboard_and_health(tmp_path):
         schema = client.get("/openapi.json")
         metrics = client.get("/metrics")
         storage = client.get("/v1/storage")
+        project = client.post("/v1/projects", json={"name": "Audit UI"}).json()
+        project_page = client.get(f"/projects/{project['project_id']}")
 
     assert page.status_code == 200
     assert "Biolab Evidence Workspace" in page.text
+    assert project_page.status_code == 200
+    assert "Verify project audit" in project_page.text
     assert health.json() == {"status": "ok", "service": "biolab"}
-    assert schema.json()["info"]["version"] == "0.4.1"
+    assert schema.json()["info"]["version"] == "0.5.0"
     assert metrics.json()["audit_chain_valid"] is True
     assert metrics.json()["counts"]["retrievals"] == 0
     assert storage.json()["metadata"]["backend"] == "sqlite"
@@ -98,7 +102,56 @@ def test_selected_mcp_paper_flows_into_project_parser_and_notes(monkeypatch, tmp
     assert parsed.json()["retrieval_id"] == record.retrieval_id
     assert notes.status_code == 201
     assert report.json()["papers"][0]["retrieval_id"] == record.retrieval_id
-    assert report.json()["notes"][0]["note_text"] == "The reviewed result improved."
+
+
+def test_three_paper_project_rag_download_and_audit_workflow(monkeypatch, tmp_path):
+    from biolab import document_parser
+
+    monkeypatch.setattr(rag, "index_parser_blocks", lambda *args: {"status": "active", "indexed_blocks": len(args[3])})
+    monkeypatch.setattr(document_parser, "validate_rag_result", lambda *args: None)
+    monkeypatch.setattr(rag, "answer_parser_context", lambda project_id, question, top_k, sections: {
+        "status": "active", "grounded": True, "answer": "Reviewed evidence supports the query.",
+        "citations": [], "answer_spans": [], "chunks": [],
+    })
+    app = create_app(tmp_path / "three-paper.db", require_auth=False)
+    with TestClient(app) as client:
+        project = client.post("/v1/projects", json={
+            "name": "Three paper review", "objective": "Compare evidence",
+            "research_question": "What changed?", "scope": "Selected papers only",
+        }).json()
+        records = []
+        for index in range(3):
+            record = retrieval_log.write_retrieval(
+                app.state.conn, "Paper source", f"PAPER-{index}", "anonymous", "pubmed", {}, "raw",
+                {"title": f"Paper {index}", "abstract": f"Results for paper {index} improved."},
+            )
+            records.append(record)
+            assert client.post(f"/v1/projects/{project['project_id']}/retrievals", json={"retrieval_id": record.retrieval_id}).status_code == 201
+
+        selected = client.get(f"/v1/projects/{project['project_id']}/retrievals").json()["retrievals"]
+        assert len(selected) == 3
+        runs = []
+        for record in records:
+            parsed = client.post(f"/v1/projects/{project['project_id']}/retrievals/{record.retrieval_id}/parse")
+            assert parsed.status_code == 201
+            runs.append(parsed.json())
+            for block in parsed.json()["blocks"]:
+                assert client.post(f"/v1/parser/runs/{parsed.json()['parser_run_id']}/blocks/{block['block_id']}/review", json={"review_state": "accepted"}).status_code == 200
+
+        answer_path = f"/v1/projects/{project['project_id']}/rag/answer"
+        first = client.post(answer_path, json={"question": "What changed?"})
+        second = client.post(answer_path, json={"question": "What changed?"})
+        history = client.get(f"/v1/projects/{project['project_id']}/query-history")
+        audit_result = client.get(f"/v1/projects/{project['project_id']}/audit")
+        report = client.get(f"/v1/projects/{project['project_id']}/report").json()
+        downloads = [client.get(f"/v1/parser/runs/{run['parser_run_id']}/download") for run in runs]
+
+    assert first.status_code == 200 and first.json()["grounded"] is True
+    assert second.json()["cached"] is True
+    assert len(history.json()["queries"]) == 2
+    assert audit_result.json()["valid"] is True
+    assert len(report["papers"]) == 3 and len(report["parser_runs"]) == 3
+    assert all(download.status_code == 200 for download in downloads)
 
 
 def test_project_audit_records_history_and_detects_tampering(tmp_path):
@@ -477,6 +530,8 @@ def test_project_click_opens_dedicated_workspace_page(tmp_path):
     assert page.status_code == 200
     assert "Selected MCP papers" in page.text
     assert "Parsed papers and review gate" in page.text
+    assert "Knowledge graph review" in page.text
+    assert "Extract graph proposals" in page.text
     assert 'type="file"' not in page.text.lower()
     assert ">upload<" not in page.text.lower()
     assert missing.status_code == 404

@@ -20,6 +20,7 @@ from biolab import (
     europepmc_client,
     executions,
     exports,
+    graph,
     inference,
     pubmed_client,
     rag,
@@ -336,6 +337,7 @@ def search_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
         raise ValueError("project not found")
     result = rag.search_parser_context(project_id, question, top_k, sections)
     audit.record(_conn, project_id, "rag_queried", "project", project_id, owner, {"question": question, "status": result.get("status", "")})
+    workspace.record_query(_conn, project_id, question, "search", False, result.get("status", ""), owner)
     _conn.commit()
     return result
 
@@ -347,7 +349,8 @@ def answer_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
     if not workspace.has_project_access(_conn, project_id, owner):
         raise ValueError("project not found")
     corpus_fingerprint = document_parser.project_corpus_fingerprint(_conn, project_id)
-    key = rag.query_key(question, top_k, sections, "answer", corpus_fingerprint)
+    context_fingerprint = workspace.project_context_fingerprint(_conn, project_id)
+    key = rag.query_key(question, top_k, sections, "answer", corpus_fingerprint, context_fingerprint=context_fingerprint)
     cached = _conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, key)).fetchone()
     if cached:
         result = json.loads(cached[0])
@@ -365,8 +368,30 @@ def answer_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
     else:
         result["cached"] = True
     audit.record(_conn, project_id, "rag_answered", "project", project_id, owner, {"question": question, "grounded": result.get("grounded", False), "cached": bool(cached)})
+    workspace.record_query(_conn, project_id, question, "answer", bool(cached), result.get("status", ""), owner)
     _conn.commit()
     return result
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_project_context(project_id: str, ctx: Context) -> dict:
+    """Return the selected project's research context only."""
+    context = workspace.get_project_context(_conn, project_id, _bound("mcp:user", ctx))
+    if context is None:
+        raise ValueError("project not found")
+    return context
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def update_project_context(project_id: str, ctx: Context, objective: str = "", research_question: str = "", scope: str = "") -> dict:
+    """Update research context for the selected project; it is not global memory."""
+    return workspace.update_project_context(_conn, project_id, _bound("mcp:user", ctx), objective, research_question, scope)
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def list_project_query_history(project_id: str, ctx: Context, limit: int = 50) -> dict:
+    """List only the selected project's recorded RAG queries."""
+    return {"queries": workspace.list_query_history(_conn, project_id, _bound("mcp:user", ctx), limit)}
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
@@ -377,6 +402,76 @@ def get_project_audit(project_id: str, ctx: Context) -> dict:
         raise ValueError("project not found")
     valid, broken_id = audit.verify_project(_conn, project_id)
     return {"project_id": project_id, "valid": valid, "first_broken_event_id": broken_id, "events": audit.list_events(_conn, project_id)}
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def list_graph_proposals(project_id: str, ctx: Context, status: str | None = None, limit: int = 100) -> dict:
+    """List project-scoped knowledge-graph proposals awaiting or having received review."""
+    return {"proposals": graph.list_proposals(_conn, project_id, owner_id=_bound("mcp:user", ctx), status=status, limit=limit)}
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def get_graph_stats(project_id: str, ctx: Context) -> dict:
+    """Return counts and the accepted graph fingerprint for one project."""
+    return graph.stats(_conn, project_id, owner_id=_bound("mcp:user", ctx))
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def extract_project_graph(project_id: str, parser_run_id: str, ctx: Context) -> dict:
+    """Extract pending, provenance-backed graph proposals from accepted parser blocks."""
+    owner = _bound("mcp:user", ctx)
+    run = _conn.execute("SELECT project_id FROM parser_runs WHERE parser_run_id = ?", (parser_run_id,)).fetchone()
+    if run is None or run[0] != project_id:
+        raise ValueError("parser run not found")
+    return graph.extract_parser_run(_conn, parser_run_id, owner_id=owner)
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def query_project_graph(project_id: str, question: str, ctx: Context, limit: int = 8) -> dict:
+    """Return accepted graph facts relevant to a project question."""
+    return {"facts": graph.query_context(_conn, project_id, question, owner_id=_bound("mcp:user", ctx), limit=limit)}
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def expand_graph_entity(project_id: str, node_id: str, ctx: Context, limit: int = 50) -> dict:
+    """Expand one accepted graph node; pending relationships are never returned."""
+    return graph.expand_node(_conn, project_id, node_id, owner_id=_bound("mcp:user", ctx), limit=limit)
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
+def trace_graph_entity(project_id: str, entity_id: str, ctx: Context) -> dict:
+    """Trace a graph node, edge, or proposal to preserved source provenance."""
+    return {"provenance": graph.trace_entity(_conn, project_id, entity_id, owner_id=_bound("mcp:user", ctx))}
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def propose_graph_entity(
+    project_id: str, node_type: str, canonical_name: str, provenance: list[dict], ctx: Context,
+    namespace: str = "", external_id: str = "", properties: dict | None = None,
+    extraction_run_id: str | None = None,
+) -> dict:
+    """Propose a graph node with source provenance; this tool cannot accept it."""
+    owner = _bound("mcp:user", ctx)
+    return graph.create_node_proposal(
+        _conn, project_id, node_type, canonical_name, owner_id=owner, namespace=namespace,
+        external_id=external_id, properties=properties or {}, extraction_run_id=extraction_run_id,
+        provenance=provenance, created_by=owner,
+    )
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def propose_graph_relationship(
+    project_id: str, subject_node_id: str, predicate: str, object_node_id: str,
+    provenance: list[dict], ctx: Context, properties: dict | None = None,
+    confidence: float | None = None, extraction_run_id: str | None = None,
+) -> dict:
+    """Propose a graph relationship with source provenance; review remains human-gated."""
+    owner = _bound("mcp:user", ctx)
+    return graph.create_edge_proposal(
+        _conn, project_id, subject_node_id, predicate, object_node_id, owner_id=owner,
+        properties=properties or {}, confidence=confidence, extraction_run_id=extraction_run_id,
+        provenance=provenance, created_by=owner,
+    )
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
