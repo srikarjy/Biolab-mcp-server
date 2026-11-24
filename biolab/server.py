@@ -685,6 +685,29 @@ def export_project_report(project_id: str, ctx: Context, format: str = "markdown
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
+def export_project_notebook(project_id: str, ctx: Context) -> dict:
+    """Export a cited Jupyter notebook with project context and audit status."""
+    owner = _bound("mcp:user", ctx)
+    report = workspace.get_project_report(_conn, project_id, owner)
+    if report is None:
+        raise ValueError("project not found")
+    query_history = workspace.list_query_history(_conn, project_id, owner)
+    notes = workspace.list_project_notes(_conn, project_id, owner)
+    valid, broken_id = audit.verify_project(_conn, project_id)
+    audit_status = {"valid": valid, "event_count": len(audit.list_events(_conn, project_id)), "first_broken_event_id": broken_id}
+    content = exports.project_notebook(report, query_history, notes, audit_status)
+    record = exports.record_export(_conn, project_id, "ipynb", content, owner)
+    audit.record(_conn, project_id, "notebook_exported", "project", project_id, owner, {"format": "ipynb", "size_bytes": len(content), "actor": "mcp"})
+    _conn.commit()
+    return {
+        "export": record,
+        "media_type": "application/x-ipynb+json",
+        "filename": f"{project_id}.ipynb",
+        "content_base64": base64.b64encode(content).decode(),
+    }
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
 def save_reviewed_evidence(
     project_id: str, ranking_run_id: str, candidate_ids: list[str], ctx: Context, override_note: str = ""
 ) -> dict:

@@ -67,6 +67,7 @@ def test_parsed_documents_live_inside_project_folder_and_download(monkeypatch, t
         folder = client.get(f"/v1/projects/{project['project_id']}/parser-runs")
         rag_search = client.post(f"/v1/projects/{project['project_id']}/rag/search", json={"question": "stored evidence"})
         download = client.get(f"/v1/parser/runs/{run_id}/download")
+        notebook = client.get(f"/v1/projects/{project['project_id']}/notebook")
     assert parsed.status_code == 201
     assert parsed.json()["project_id"] == project["project_id"]
     assert folder.status_code == 200
@@ -76,6 +77,10 @@ def test_parsed_documents_live_inside_project_folder_and_download(monkeypatch, t
     assert download.status_code == 200
     assert download.headers["content-disposition"].endswith('"paper.parsed.json"')
     assert download.json()["blocks"][0]["text"] == "Stored evidence"
+    assert notebook.status_code == 200
+    assert notebook.headers["content-disposition"].endswith(f'"{project["project_id"]}.ipynb"')
+    assert notebook.json()["nbformat"] == 4
+    assert any(cell["cell_type"] == "code" for cell in notebook.json()["cells"])
 
 
 def test_selected_mcp_paper_flows_into_project_parser_and_notes(monkeypatch, tmp_path):

@@ -36,3 +36,14 @@ def test_external_ai_audit_tools_have_explicit_permissions():
     assert tools["get_project_audit"].annotations.readOnlyHint is True
     assert tools["verify_project_audit"].annotations.readOnlyHint is True
     assert tools["export_project_audit"].annotations.readOnlyHint is False
+
+
+def test_external_ai_notebook_export_is_write_audited():
+    from biolab.server import mcp
+
+    async def listed():
+        return {tool.name: tool for tool in await mcp.list_tools() if "notebook" in tool.name}
+
+    tools = asyncio.run(listed())
+    assert "export_project_notebook" in tools
+    assert tools["export_project_notebook"].annotations.readOnlyHint is False
