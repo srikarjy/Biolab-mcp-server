@@ -33,6 +33,7 @@ from biolab import (
     ranking,
     retrieval_log,
     workspace,
+    zotero,
 )
 
 MAX_ENCODED_DOCUMENT_CHARS = ((hf_parser.MAX_DOCUMENT_BYTES + 2) // 3) * 4
@@ -112,6 +113,7 @@ OPENAPI_SCHEMA = {
         },
         "/v1/projects/{project_id}/report": {"get": {"summary": "Export a project report as JSON, Markdown, or PDF"}},
         "/v1/projects/{project_id}/notebook": {"get": {"summary": "Export a cited Jupyter notebook for the project"}},
+        "/v1/projects/{project_id}/imports/zotero": {"post": {"summary": "Import Zotero JSON metadata into a project"}},
         "/v1/projects/{project_id}/audit/export": {"post": {"summary": "Export the verified project audit ledger"}},
         "/v1/projects/{project_id}/graph/proposals": {"get": {"summary": "List graph proposals"}, "post": {"summary": "Create a provenance-backed graph proposal"}},
         "/v1/projects/{project_id}/graph/proposals/{proposal_id}/review": {"post": {"summary": "Review a graph proposal"}},
@@ -1426,6 +1428,19 @@ async def project_notebook(request: Request) -> Response:
     return Response(content, media_type="application/x-ipynb+json", headers={"Content-Disposition": f'attachment; filename="{project_id}.ipynb"'})
 
 
+async def project_zotero_import(request: Request) -> JSONResponse:
+    project_id = request.path_params["project_id"]
+    owner_id = auth.request_identity(request)
+    try:
+        payload = await request.json()
+        result = zotero.import_items(request.app.state.conn, project_id, payload.get("items") if isinstance(payload, dict) else None, owner_id)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    audit.record(request.app.state.conn, project_id, "zotero_imported", "project", project_id, owner_id, {"imported_count": result["imported_count"], "duplicate_count": result["duplicate_count"], "metadata_only": True})
+    request.app.state.conn.commit()
+    return JSONResponse(result, status_code=201)
+
+
 async def save_reviewed_project_evidence(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
@@ -1738,6 +1753,7 @@ def api_routes() -> list[Route]:
         Route("/v1/projects", projects, methods=["GET", "POST"]),
         Route("/v1/projects/{project_id}/report", project_report),
         Route("/v1/projects/{project_id}/notebook", project_notebook),
+        Route("/v1/projects/{project_id}/imports/zotero", project_zotero_import, methods=["POST"]),
         Route("/v1/projects/{project_id}/audit", project_audit),
         Route("/v1/projects/{project_id}/audit/export", project_audit_export, methods=["POST"]),
         Route("/v1/projects/{project_id}/graph/proposals", project_graph_proposals, methods=["GET", "POST"]),

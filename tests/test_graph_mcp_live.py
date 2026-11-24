@@ -106,6 +106,9 @@ async def test_mcp_graph_propose_review_and_trace(tmp_path):
         notebook_payload = json.loads(notebook.content[0].text)
         notebook_bytes = base64.b64decode(notebook_payload["content_base64"])
         assert json.loads(notebook_bytes)["nbformat"] == 4
+        zotero_import = await session.call_tool("import_zotero_items", {"project_id": project_id, "items": [{"key": "ZOTERO1", "itemType": "journalArticle", "title": "Imported KRAS metadata", "DOI": "10.1000/zotero"}]})
+        assert zotero_import.isError is False, zotero_import.content
+        assert json.loads(zotero_import.content[0].text)["imported_count"] == 1
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT status FROM graph_proposals").fetchone()[0] == "pending"
