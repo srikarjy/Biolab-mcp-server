@@ -122,6 +122,21 @@ def test_github_export_contains_reproducible_research_artifacts(tmp_path):
         assert archive.read("MANIFEST.json")
 
 
+def test_cited_notes_export_supports_obsidian_and_notion(tmp_path):
+    with TestClient(create_app(tmp_path / "notes-export.db", require_auth=False)) as client:
+        project = client.post("/v1/projects", json={"name": "Notes review", "research_question": "What changed?"}).json()
+        obsidian = client.get(f"/v1/projects/{project['project_id']}/notes-export?target=obsidian")
+        notion = client.get(f"/v1/projects/{project['project_id']}/notes-export?target=notion")
+        invalid = client.get(f"/v1/projects/{project['project_id']}/notes-export?target=other")
+
+    assert obsidian.status_code == 200
+    assert "export_target: \"obsidian\"" in obsidian.text
+    assert "audit_chain_valid: true" in obsidian.text
+    assert notion.status_code == 200
+    assert "export_target: \"notion\"" in notion.text
+    assert invalid.status_code == 400
+
+
 def test_selected_mcp_paper_flows_into_project_parser_and_notes(monkeypatch, tmp_path):
     monkeypatch.setattr(rag, "index_parser_blocks", lambda *args: {"status": "active", "indexed_blocks": len(args[3])})
     app = create_app(tmp_path / "selected-paper.db", require_auth=False)
