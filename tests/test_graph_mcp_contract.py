@@ -23,3 +23,16 @@ def test_graph_mcp_tools_are_read_or_proposal_only():
     assert tools["propose_graph_entity"].annotations.readOnlyHint is False
     assert tools["propose_graph_relationship"].annotations.readOnlyHint is False
     assert not any("accept_graph" in name or "review_graph" in name for name in tools)
+
+
+def test_external_ai_audit_tools_have_explicit_permissions():
+    from biolab.server import mcp
+
+    async def listed():
+        return {tool.name: tool for tool in await mcp.list_tools() if "audit" in tool.name}
+
+    tools = asyncio.run(listed())
+    assert {"get_project_audit", "verify_project_audit", "export_project_audit"} <= tools.keys()
+    assert tools["get_project_audit"].annotations.readOnlyHint is True
+    assert tools["verify_project_audit"].annotations.readOnlyHint is True
+    assert tools["export_project_audit"].annotations.readOnlyHint is False

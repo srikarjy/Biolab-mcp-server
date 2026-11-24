@@ -405,6 +405,44 @@ def get_project_audit(project_id: str, ctx: Context) -> dict:
 
 
 @mcp.tool(annotations=READ_ANNOTATIONS)
+def verify_project_audit(project_id: str, ctx: Context) -> dict:
+    """Return a compact integrity result for an external AI or review client."""
+    owner = _bound("mcp:user", ctx)
+    if not workspace.has_project_access(_conn, project_id, owner):
+        raise ValueError("project not found")
+    valid, broken_id = audit.verify_project(_conn, project_id)
+    events = audit.list_events(_conn, project_id)
+    return {
+        "project_id": project_id,
+        "valid": valid,
+        "audit_chain_valid": valid,
+        "event_count": len(events),
+        "first_broken_event_id": broken_id,
+    }
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def export_project_audit(project_id: str, ctx: Context) -> dict:
+    """Create an auditable JSON-ready project history for an external reviewer."""
+    owner = _bound("mcp:user", ctx)
+    if not workspace.has_project_access(_conn, project_id, owner):
+        raise ValueError("project not found")
+    valid, broken_id = audit.verify_project(_conn, project_id)
+    if not valid:
+        raise ValueError(f"audit chain is broken at {broken_id}")
+    event = audit.record(_conn, project_id, "audit_exported", "project", project_id, owner, {"format": "json", "actor": "mcp"})
+    _conn.commit()
+    events = audit.list_events(_conn, project_id)
+    return {
+        "project_id": project_id,
+        "valid": audit.verify_project(_conn, project_id)[0],
+        "event_count": len(events),
+        "export_event_id": event["event_id"],
+        "events": events,
+    }
+
+
+@mcp.tool(annotations=READ_ANNOTATIONS)
 def list_graph_proposals(project_id: str, ctx: Context, status: str | None = None, limit: int = 100) -> dict:
     """List project-scoped knowledge-graph proposals awaiting or having received review."""
     return {"proposals": graph.list_proposals(_conn, project_id, owner_id=_bound("mcp:user", ctx), status=status, limit=limit)}
