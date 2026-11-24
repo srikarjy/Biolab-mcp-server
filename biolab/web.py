@@ -111,6 +111,7 @@ OPENAPI_SCHEMA = {
             "post": {"summary": "Create a project"},
         },
         "/v1/projects/{project_id}/report": {"get": {"summary": "Export a project report as JSON, Markdown, or PDF"}},
+        "/v1/projects/{project_id}/notebook": {"get": {"summary": "Export a cited Jupyter notebook for the project"}},
         "/v1/projects/{project_id}/audit/export": {"post": {"summary": "Export the verified project audit ledger"}},
         "/v1/projects/{project_id}/graph/proposals": {"get": {"summary": "List graph proposals"}, "post": {"summary": "Create a provenance-backed graph proposal"}},
         "/v1/projects/{project_id}/graph/proposals/{proposal_id}/review": {"post": {"summary": "Review a graph proposal"}},
@@ -1405,6 +1406,26 @@ async def project_report(request: Request):
     return JSONResponse(report)
 
 
+async def project_notebook(request: Request) -> Response:
+    project_id = request.path_params["project_id"]
+    owner_id = auth.bind_agent_id("anonymous", request)
+    report = workspace.get_project_report(request.app.state.conn, project_id, owner_id)
+    if report is None:
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    try:
+        query_history = workspace.list_query_history(request.app.state.conn, project_id, owner_id)
+        notes = workspace.list_project_notes(request.app.state.conn, project_id, owner_id)
+    except ValueError:
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    valid, broken_id = audit.verify_project(request.app.state.conn, project_id)
+    audit_status = {"valid": valid, "event_count": len(audit.list_events(request.app.state.conn, project_id)), "first_broken_event_id": broken_id}
+    content = exports.project_notebook(report, query_history, notes, audit_status)
+    exports.record_export(request.app.state.conn, project_id, "ipynb", content, auth.bind_agent_id("api:notebook", request))
+    audit.record(request.app.state.conn, project_id, "notebook_exported", "project", project_id, owner_id, {"format": "ipynb", "size_bytes": len(content)})
+    request.app.state.conn.commit()
+    return Response(content, media_type="application/x-ipynb+json", headers={"Content-Disposition": f'attachment; filename="{project_id}.ipynb"'})
+
+
 async def save_reviewed_project_evidence(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
@@ -1716,6 +1737,7 @@ def api_routes() -> list[Route]:
         Route("/v1/verify", verify),
         Route("/v1/projects", projects, methods=["GET", "POST"]),
         Route("/v1/projects/{project_id}/report", project_report),
+        Route("/v1/projects/{project_id}/notebook", project_notebook),
         Route("/v1/projects/{project_id}/audit", project_audit),
         Route("/v1/projects/{project_id}/audit/export", project_audit_export, methods=["POST"]),
         Route("/v1/projects/{project_id}/graph/proposals", project_graph_proposals, methods=["GET", "POST"]),

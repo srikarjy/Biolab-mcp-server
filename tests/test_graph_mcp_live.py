@@ -5,6 +5,7 @@ process. It is the MCP half of the graph release gate.
 """
 
 import asyncio
+import base64
 import contextlib
 import json
 import os
@@ -100,6 +101,11 @@ async def test_mcp_graph_propose_review_and_trace(tmp_path):
         audit_payload = json.loads(audit_status.content[0].text)
         assert audit_payload["valid"] is True
         assert audit_payload["audit_chain_valid"] is True
+        notebook = await session.call_tool("export_project_notebook", {"project_id": project_id})
+        assert notebook.isError is False, notebook.content
+        notebook_payload = json.loads(notebook.content[0].text)
+        notebook_bytes = base64.b64decode(notebook_payload["content_base64"])
+        assert json.loads(notebook_bytes)["nbformat"] == 4
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT status FROM graph_proposals").fetchone()[0] == "pending"
