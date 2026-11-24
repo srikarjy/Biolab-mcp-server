@@ -29,6 +29,7 @@ from biolab import (
     tools,
     web,
     workspace,
+    zotero,
 )
 from biolab import evidence as evidence_service
 from biolab.auth import check_exposure
@@ -705,6 +706,16 @@ def export_project_notebook(project_id: str, ctx: Context) -> dict:
         "filename": f"{project_id}.ipynb",
         "content_base64": base64.b64encode(content).decode(),
     }
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
+def import_zotero_items(project_id: str, items: list[dict], ctx: Context) -> dict:
+    """Import Zotero JSON metadata into a project as preserved retrievals."""
+    owner = _bound("mcp:user", ctx)
+    result = zotero.import_items(_conn, project_id, items, owner)
+    audit.record(_conn, project_id, "zotero_imported", "project", project_id, owner, {"imported_count": result["imported_count"], "duplicate_count": result["duplicate_count"], "metadata_only": True, "actor": "mcp"})
+    _conn.commit()
+    return result
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)

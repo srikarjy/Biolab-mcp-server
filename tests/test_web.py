@@ -83,6 +83,30 @@ def test_parsed_documents_live_inside_project_folder_and_download(monkeypatch, t
     assert any(cell["cell_type"] == "code" for cell in notebook.json()["cells"])
 
 
+def test_zotero_metadata_import_is_preserved_and_deduplicated(tmp_path):
+    item = {
+        "key": "ABC123",
+        "itemType": "journalArticle",
+        "title": "KRAS study",
+        "abstractNote": "Metadata-only abstract",
+        "DOI": "10.1000/example",
+        "creators": [{"firstName": "Ada", "lastName": "Lovelace", "creatorType": "author"}],
+        "tags": [{"tag": "KRAS"}],
+    }
+    with TestClient(create_app(tmp_path / "zotero.db", require_auth=False)) as client:
+        project = client.post("/v1/projects", json={"name": "Zotero import"}).json()
+        first = client.post(f"/v1/projects/{project['project_id']}/imports/zotero", json={"items": [item]})
+        second = client.post(f"/v1/projects/{project['project_id']}/imports/zotero", json={"items": [item]})
+        papers = client.get(f"/v1/projects/{project['project_id']}/retrievals")
+
+    assert first.status_code == 201
+    assert first.json()["imported_count"] == 1
+    assert first.json()["metadata_only"] is True
+    assert second.json()["duplicate_count"] == 1
+    assert len(papers.json()["retrievals"]) == 1
+    assert papers.json()["retrievals"][0]["source"] == "zotero"
+
+
 def test_selected_mcp_paper_flows_into_project_parser_and_notes(monkeypatch, tmp_path):
     monkeypatch.setattr(rag, "index_parser_blocks", lambda *args: {"status": "active", "indexed_blocks": len(args[3])})
     app = create_app(tmp_path / "selected-paper.db", require_auth=False)
