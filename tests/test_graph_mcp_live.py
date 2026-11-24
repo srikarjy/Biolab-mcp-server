@@ -7,12 +7,14 @@ process. It is the MCP half of the graph release gate.
 import asyncio
 import base64
 import contextlib
+import io
 import json
 import os
 import socket
 import sqlite3
 import subprocess
 import sys
+import zipfile
 from pathlib import Path
 
 import httpx
@@ -109,6 +111,11 @@ async def test_mcp_graph_propose_review_and_trace(tmp_path):
         zotero_import = await session.call_tool("import_zotero_items", {"project_id": project_id, "items": [{"key": "ZOTERO1", "itemType": "journalArticle", "title": "Imported KRAS metadata", "DOI": "10.1000/zotero"}]})
         assert zotero_import.isError is False, zotero_import.content
         assert json.loads(zotero_import.content[0].text)["imported_count"] == 1
+        bundle = await session.call_tool("export_project_github_bundle", {"project_id": project_id})
+        assert bundle.isError is False, bundle.content
+        bundle_payload = json.loads(bundle.content[0].text)
+        with zipfile.ZipFile(io.BytesIO(base64.b64decode(bundle_payload["content_base64"]))) as archive:
+            assert "MANIFEST.json" in archive.namelist()
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT status FROM graph_proposals").fetchone()[0] == "pending"

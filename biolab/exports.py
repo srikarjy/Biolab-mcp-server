@@ -6,7 +6,9 @@ import hashlib
 import json
 import re
 import uuid
+import zipfile
 from datetime import UTC, datetime
+from io import BytesIO
 from typing import Any
 
 
@@ -69,6 +71,20 @@ def project_notebook(report: dict[str, Any], query_history: list[dict[str, Any]]
         "nbformat_minor": 5,
     }
     return json.dumps(notebook, indent=2, ensure_ascii=False).encode("utf-8")
+
+
+def github_bundle(files: dict[str, bytes]) -> bytes:
+    """Create a deterministic GitHub-ready research artifact ZIP."""
+    manifest = {
+        "format": "biolab-github-research-bundle-v1",
+        "files": {name: {"sha256": hashlib.sha256(content).hexdigest(), "size_bytes": len(content)} for name, content in sorted(files.items())},
+    }
+    all_files = {**files, "MANIFEST.json": json.dumps(manifest, indent=2, sort_keys=True).encode("utf-8")}
+    output = BytesIO()
+    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name, content in sorted(all_files.items()):
+            archive.writestr(name, content)
+    return output.getvalue()
 
 
 def _pdf_escape(value: str) -> str:
