@@ -11,6 +11,8 @@ import os
 from typing import Any
 from urllib import request
 
+from biolab.http_retry import urlopen_with_retry
+
 
 def configured() -> bool:
     return bool(os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("NVIDIA_API_KEY"))
@@ -62,7 +64,7 @@ def generate_grounded_claims(question: str, evidence: list[dict[str, Any]], max_
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
-    with request.urlopen(req, timeout=float(os.environ.get("DEEPSEEK_TIMEOUT_SECONDS", "45"))) as response:
+    with urlopen_with_retry(request.urlopen, req, timeout=float(os.environ.get("DEEPSEEK_TIMEOUT_SECONDS", "45")), retries=int(os.environ.get("BIOLAB_PROVIDER_RETRIES", "3")), backoff_seconds=float(os.environ.get("BIOLAB_PROVIDER_BACKOFF_SECONDS", "0.5"))) as response:
         result = json.loads(response.read().decode("utf-8"))
     content = result["choices"][0]["message"]["content"]
     parsed = json.loads(content) if isinstance(content, str) else content
