@@ -74,3 +74,10 @@ def test_deepseek_path_validates_citations(monkeypatch, tmp_path):
     assert result["model_provider"] == "deepseek"
     assert result["insight_count"] == 1
     assert result["insights"][0]["citations"][0]["excerpt"] == "KRAS is associated with pancreatic cancer."
+
+
+def test_nvidia_key_enables_hosted_grounded_inference(monkeypatch):
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-test")
+    monkeypatch.setenv("NVIDIA_INFERENCE_MODEL", "nvidia/nemotron-3.5-bolt-e4b")
+    assert deepseek_client.configured() is True
