@@ -5,11 +5,15 @@ same evidence and retrieval services as the CLI and MCP server.
 """
 
 import base64
+import hashlib
 import json
+import uuid
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from starlette.applications import Starlette
+from starlette.datastructures import MutableHeaders
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from starlette.routing import Route
@@ -32,6 +36,33 @@ from biolab import (
 )
 
 MAX_ENCODED_DOCUMENT_CHARS = ((hf_parser.MAX_DOCUMENT_BYTES + 2) // 3) * 4
+IDEMPOTENCY_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+
+
+async def _read_body(receive):
+    """Read and replay an ASGI request body when idempotency is requested."""
+    messages = []
+    chunks = []
+    while True:
+        message = await receive()
+        messages.append(message)
+        if message["type"] != "http.request":
+            break
+        chunks.append(message.get("body", b""))
+        if not message.get("more_body", False):
+            break
+    body = b"".join(chunks)
+    replay_index = 0
+
+    async def replay():
+        nonlocal replay_index
+        if replay_index < len(messages):
+            message = messages[replay_index]
+            replay_index += 1
+            return message
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    return body, replay
 
 
 def _decode_document_payload(encoded: object) -> bytes:
@@ -45,7 +76,7 @@ OPENAPI_SCHEMA = {
     "openapi": "3.1.0",
     "info": {
         "title": "Biolab Evidence API",
-        "version": "0.4.1",
+        "version": "0.5.0",
         "description": "Auditable scientific retrieval, projects, monitoring, and claim provenance.",
     },
     "paths": {
@@ -1484,13 +1515,22 @@ class RestApiKeyAuthMiddleware:
         self.app = app
         self.require_auth = require_auth
 
-    async def __call__(self, scope, receive, send):
+    async def __call__(self, scope, receive, send):  # noqa: PLR0911, PLR0915 - auth and idempotency are one ASGI boundary
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
         path = scope.get("path", "")
+        request_id = uuid.uuid4().hex
+        scope["biolab_request_id"] = request_id
+
+        async def send_with_request_id(message):
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(raw=message.setdefault("headers", []))
+                headers.append("x-request-id", request_id)
+            await send(message)
+
         if path in {"/", "/health", "/openapi.json", "/.well-known/agent-card.json"}:
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, send_with_request_id)
             return
 
         headers = dict(scope.get("headers") or [])
@@ -1500,18 +1540,90 @@ class RestApiKeyAuthMiddleware:
             raw_key = auth_header.removeprefix("Bearer ").strip()
             identity = auth.verify_api_key(scope["app"].state.conn, raw_key) or ""
             if not identity:
-                response = JSONResponse({"error": "invalid or revoked API key"}, status_code=401)
-                await response(scope, receive, send)
+                response = JSONResponse(
+                    {"error": {"code": "invalid_api_key", "message": "invalid or revoked API key"}, "request_id": request_id},
+                    status_code=401,
+                )
+                await response(scope, receive, send_with_request_id)
                 return
         elif self.require_auth:
-            response = JSONResponse({"error": "API key required"}, status_code=401)
-            await response(scope, receive, send)
+            response = JSONResponse(
+                {"error": {"code": "authentication_required", "message": "API key required"}, "request_id": request_id},
+                status_code=401,
+            )
+            await response(scope, receive, send_with_request_id)
             return
 
         scope["biolab_identity"] = identity
+        idempotency_key = headers.get(b"idempotency-key", b"").decode("latin-1").strip()
+        replay_receive = receive
+        request_body = b""
+        request_hash = ""
+        captured_status = None
+        captured_headers = []
+        captured_body = bytearray()
+        if scope.get("method", "GET").upper() in IDEMPOTENCY_METHODS and idempotency_key:
+            if len(idempotency_key) > 200:
+                response = JSONResponse(
+                    {"error": {"code": "invalid_idempotency_key", "message": "Idempotency-Key is too long"}, "request_id": request_id},
+                    status_code=400,
+                )
+                await response(scope, receive, send_with_request_id)
+                return
+            request_body, replay_receive = await _read_body(receive)
+            request_hash = hashlib.sha256(request_body).hexdigest()
+            existing = scope["app"].state.conn.execute(
+                "SELECT method, path, request_hash, status_code, response_headers, response_body "
+                "FROM idempotency_keys WHERE actor_id = ? AND idempotency_key = ?",
+                (identity, idempotency_key),
+            ).fetchone()
+            if existing:
+                if existing[0] != scope["method"] or existing[1] != scope.get("path", "") or existing[2] != request_hash:
+                    response = JSONResponse(
+                        {"error": {"code": "idempotency_conflict", "message": "Idempotency-Key was reused with a different request"}, "request_id": request_id},
+                        status_code=409,
+                    )
+                    await response(scope, replay_receive, send_with_request_id)
+                    return
+                response_headers = json.loads(existing[4])
+                response = Response(existing[5], status_code=existing[3], headers=dict(response_headers))
+                await response(scope, replay_receive, send_with_request_id)
+                return
+
+        async def send_capture(message):
+            nonlocal captured_status, captured_headers
+            if message["type"] == "http.response.start":
+                captured_status = message["status"]
+                captured_headers = [
+                    [name.decode("latin-1"), value.decode("latin-1")]
+                    for name, value in message.get("headers", [])
+                    if name.lower() != b"x-request-id"
+                ]
+            elif message["type"] == "http.response.body":
+                captured_body.extend(message.get("body", b""))
+            await send_with_request_id(message)
+
         token = auth.current_identity.set(identity)
         try:
-            await self.app(scope, receive, send)
+            await self.app(scope, replay_receive, send_capture)
+            if idempotency_key and request_hash and captured_status is not None:
+                scope["app"].state.conn.execute(
+                    "INSERT INTO idempotency_keys "
+                    "(actor_id, idempotency_key, method, path, request_hash, status_code, response_headers, response_body, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        identity,
+                        idempotency_key,
+                        scope["method"],
+                        scope.get("path", ""),
+                        request_hash,
+                        captured_status,
+                        json.dumps(captured_headers),
+                        bytes(captured_body),
+                        datetime.now(UTC).isoformat(),
+                    ),
+                )
+                scope["app"].state.conn.commit()
         finally:
             auth.current_identity.reset(token)
 

@@ -18,7 +18,7 @@ def test_dashboard_and_health(tmp_path):
     assert page.status_code == 200
     assert "Biolab Evidence Workspace" in page.text
     assert health.json() == {"status": "ok", "service": "biolab"}
-    assert schema.json()["info"]["version"] == "0.4.1"
+    assert schema.json()["info"]["version"] == "0.5.0"
     assert metrics.json()["audit_chain_valid"] is True
     assert metrics.json()["counts"]["retrievals"] == 0
     assert storage.json()["metadata"]["backend"] == "sqlite"

@@ -58,6 +58,19 @@ CREATE TABLE IF NOT EXISTS api_keys (
     revoked     INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS idempotency_keys (
+    actor_id         TEXT NOT NULL,
+    idempotency_key  TEXT NOT NULL,
+    method           TEXT NOT NULL,
+    path             TEXT NOT NULL,
+    request_hash     TEXT NOT NULL,
+    status_code      INTEGER NOT NULL,
+    response_headers TEXT NOT NULL,
+    response_body    BLOB NOT NULL,
+    created_at       TEXT NOT NULL,
+    PRIMARY KEY (actor_id, idempotency_key)
+);
+
 CREATE TABLE IF NOT EXISTS projects (
     project_id   TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
