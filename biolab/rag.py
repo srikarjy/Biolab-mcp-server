@@ -13,6 +13,13 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from biolab import embedding_client
 
 
+def _embed(texts: list[str], *, input_type: str | None = None) -> list[list[float]]:
+    """Use NVIDIA's passage/query contract while keeping other providers compatible."""
+    if embedding_client.provider() == "nvidia":
+        return embedding_client.embed(texts, input_type=input_type)
+    return embedding_client.embed(texts)
+
+
 def query_key(question: str, top_k: int, sections: list[str] | None = None, mode: str = "search", corpus_fingerprint: str = "", embedding_fingerprint: str | None = None, context_fingerprint: str = "") -> str:
     """Return a stable cache key for one project-scoped RAG operation."""
     payload = {"mode": mode, "question": question.casefold().strip(), "top_k": top_k, "sections": sections or [], "corpus": corpus_fingerprint, "context": context_fingerprint, "embedding": embedding_fingerprint or embedding_client.fingerprint(), "algorithm": "project-rag-v2"}
@@ -159,7 +166,7 @@ class PgVectorStore:
         texts = [str(block["text"]).strip() for block in indexed_blocks]
         if not texts:
             return 0
-        vectors = embedding_client.embed(texts)
+        vectors = _embed(texts, input_type="passage")
         if len(vectors) != len(indexed_blocks):
             raise ValueError("embedding provider returned the wrong number of vectors")
         if any(len(vector) != self.dimension for vector in vectors):
@@ -251,11 +258,12 @@ def retrieve_context(question: str, inference_run_id: str, evidence: list[dict[s
                     "external_id": item["external_id"], "field_name": field_name,
                     "chunk_text": chunk_text,
                 })
-    vectors = embedding_client.embed([chunk["chunk_text"] for chunk in chunks] + [question])
-    for chunk, vector in zip(chunks, vectors[:-1], strict=True):
+    vectors = _embed([chunk["chunk_text"] for chunk in chunks], input_type="passage")
+    query_vector = _embed([question], input_type="query")[0]
+    for chunk, vector in zip(chunks, vectors, strict=True):
         chunk["embedding"] = vector
     store.upsert(chunks)
-    hits = store.search(vectors[-1], top_k)
+    hits = store.search(query_vector, top_k)
     selected_ids = {hit["retrieval_id"] for hit in hits}
     selected = [item for item in evidence if item["retrieval_id"] in selected_ids]
     return selected or evidence, {"status": "active", "indexed_chunks": len(chunks), "selected_chunks": len(hits)}
@@ -336,7 +344,7 @@ def search_parser_context(project_id: str, question: str, top_k: int = 8, sectio
         raise ValueError("sections must contain non-empty names")
     if not embedding_client.configured():
         return {"status": "disabled", "reason": "embedding provider not configured", "chunks": []}
-    vector = embedding_client.embed([question])[0]
+    vector = _embed([question], input_type="query")[0]
     candidate_limit = min(50, max(top_k, top_k * 3))
     chunks = select_diverse_chunks(PgVectorStore().search_parser(project_id, vector, candidate_limit, sections), top_k)
     for chunk in chunks:
