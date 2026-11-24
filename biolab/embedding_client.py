@@ -9,6 +9,8 @@ import re
 from typing import Any
 from urllib import request
 
+from biolab.http_retry import urlopen_with_retry
+
 _local_model: Any = None
 _local_model_name: str | None = None
 EMBEDDING_SERIALIZATION_VERSION = "embedding-text-v1"
@@ -153,7 +155,7 @@ def embed(texts: list[str], input_type: str | None = None) -> list[list[float]]:
             headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
             method="POST",
         )
-        with request.urlopen(req, timeout=float(os.environ.get("BIOLAB_EMBEDDING_TIMEOUT_SECONDS", "30"))) as response:
+        with urlopen_with_retry(request.urlopen, req, timeout=float(os.environ.get("BIOLAB_EMBEDDING_TIMEOUT_SECONDS", "30")), retries=int(os.environ.get("BIOLAB_PROVIDER_RETRIES", "3")), backoff_seconds=float(os.environ.get("BIOLAB_PROVIDER_BACKOFF_SECONDS", "0.5"))) as response:
             result = json.loads(response.read().decode())
         vectors.extend(item["embedding"] for item in sorted(result["data"], key=lambda item: item["index"]))
     if len(vectors) != len(texts):
