@@ -335,9 +335,21 @@ def search_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
     owner = _bound("mcp:user", ctx)
     if not workspace.has_project_access(_conn, project_id, owner):
         raise ValueError("project not found")
-    result = rag.search_parser_context(project_id, question, top_k, sections)
-    audit.record(_conn, project_id, "rag_queried", "project", project_id, owner, {"question": question, "status": result.get("status", "")})
-    workspace.record_query(_conn, project_id, question, "search", False, result.get("status", ""), owner)
+    corpus_fingerprint = document_parser.project_corpus_fingerprint(_conn, project_id)
+    context_fingerprint = workspace.project_context_fingerprint(_conn, project_id) + ":" + graph.accepted_fingerprint(_conn, project_id, owner_id=owner)
+    key = rag.query_key(question, top_k, sections, "search", corpus_fingerprint, context_fingerprint=context_fingerprint)
+    cached = _conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, key)).fetchone()
+    if cached:
+        result = json.loads(cached[0])
+        result["cached"] = True
+    else:
+        result = rag.search_parser_context(project_id, question, top_k, sections)
+        result["graph_context"] = graph.query_context(_conn, project_id, question, owner_id=owner, limit=top_k)
+        result["cached"] = False
+        if result.get("status") == "active":
+            _conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, key, question, json.dumps(result), result.get("embedding_model", rag.embedding_client.model_name())))
+    audit.record(_conn, project_id, "rag_queried", "project", project_id, owner, {"question": question, "status": result.get("status", ""), "cached": bool(cached), "graph_edge_ids": [item.get("edge_id") for item in result.get("graph_context", [])]})
+    workspace.record_query(_conn, project_id, question, "search", bool(cached), result.get("status", ""), owner)
     _conn.commit()
     return result
 
@@ -349,7 +361,7 @@ def answer_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
     if not workspace.has_project_access(_conn, project_id, owner):
         raise ValueError("project not found")
     corpus_fingerprint = document_parser.project_corpus_fingerprint(_conn, project_id)
-    context_fingerprint = workspace.project_context_fingerprint(_conn, project_id)
+    context_fingerprint = workspace.project_context_fingerprint(_conn, project_id) + ":" + graph.accepted_fingerprint(_conn, project_id, owner_id=owner)
     key = rag.query_key(question, top_k, sections, "answer", corpus_fingerprint, context_fingerprint=context_fingerprint)
     cached = _conn.execute("SELECT result_json FROM rag_query_cache WHERE project_id = ? AND question_key = ?", (project_id, key)).fetchone()
     if cached:
@@ -361,12 +373,14 @@ def answer_project_rag(project_id: str, question: str, ctx: Context, top_k: int 
             cached = None
     if not cached:
         result = rag.answer_parser_context(project_id, question, top_k, sections)
+        result["graph_context"] = graph.query_context(_conn, project_id, question, owner_id=owner, limit=top_k)
         document_parser.validate_rag_result(_conn, project_id, result)
         result["cached"] = False
         if result.get("status") == "active":
             _conn.execute("INSERT OR REPLACE INTO rag_query_cache (project_id, question_key, question, result_json, created_at, embedding_model) VALUES (?, ?, ?, ?, datetime('now'), ?)", (project_id, key, question, json.dumps(result), rag.embedding_client.model_name()))
     else:
         result["cached"] = True
+        result.setdefault("graph_context", graph.query_context(_conn, project_id, question, owner_id=owner, limit=top_k))
     audit.record(_conn, project_id, "rag_answered", "project", project_id, owner, {"question": question, "grounded": result.get("grounded", False), "cached": bool(cached)})
     workspace.record_query(_conn, project_id, question, "answer", bool(cached), result.get("status", ""), owner)
     _conn.commit()
@@ -1044,7 +1058,10 @@ def create_hosted_app():
     app.state.conn = _conn
     app.state.a2a_tasks = a2a.A2ATaskStore()
     app.routes.extend(web.api_routes())
-    app.add_middleware(ApiKeyAuthMiddleware)
+    # Use the same request-id, auth, structured-error, and idempotency boundary
+    # for MCP and REST so external agents cannot bypass API contract controls.
+    require_auth = os.environ.get("BIOLAB_REQUIRE_AUTH", "").lower() in {"1", "true", "yes"}
+    app.add_middleware(web.RestApiKeyAuthMiddleware, require_auth=require_auth)
     return app
 
 

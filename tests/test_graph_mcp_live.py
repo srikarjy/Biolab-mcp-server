@@ -94,6 +94,12 @@ async def test_mcp_graph_propose_review_and_trace(tmp_path):
         assert json.loads(stats.content[0].text)["pending_proposals"] >= 3
         trace = await session.call_tool("trace_graph_entity", {"project_id": project_id, "entity_id": payload["node_id"]})
         assert json.loads(trace.content[0].text)["provenance"][0]["block_id"] == "mcp-block"
+        rag_search = await session.call_tool("search_project_rag", {"project_id": project_id, "question": "What activates MAPK?"})
+        assert rag_search.isError is False, rag_search.content
+        audit_status = await session.call_tool("verify_project_audit", {"project_id": project_id})
+        audit_payload = json.loads(audit_status.content[0].text)
+        assert audit_payload["valid"] is True
+        assert audit_payload["audit_chain_valid"] is True
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT status FROM graph_proposals").fetchone()[0] == "pending"
