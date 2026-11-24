@@ -47,3 +47,14 @@ def test_external_ai_notebook_export_is_write_audited():
     tools = asyncio.run(listed())
     assert "export_project_notebook" in tools
     assert tools["export_project_notebook"].annotations.readOnlyHint is False
+
+
+def test_external_ai_cited_notes_export_is_write_audited():
+    from biolab.server import mcp
+
+    async def listed():
+        return {tool.name: tool for tool in await mcp.list_tools() if "cited_notes" in tool.name}
+
+    tools = asyncio.run(listed())
+    assert "export_project_cited_notes" in tools
+    assert tools["export_project_cited_notes"].annotations.readOnlyHint is False

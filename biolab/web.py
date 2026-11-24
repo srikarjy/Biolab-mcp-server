@@ -115,6 +115,7 @@ OPENAPI_SCHEMA = {
         "/v1/projects/{project_id}/notebook": {"get": {"summary": "Export a cited Jupyter notebook for the project"}},
         "/v1/projects/{project_id}/imports/zotero": {"post": {"summary": "Import Zotero JSON metadata into a project"}},
         "/v1/projects/{project_id}/github-export": {"get": {"summary": "Export a GitHub-ready research artifact bundle"}},
+        "/v1/projects/{project_id}/notes-export": {"get": {"summary": "Export cited Markdown notes for Notion or Obsidian"}},
         "/v1/projects/{project_id}/audit/export": {"post": {"summary": "Export the verified project audit ledger"}},
         "/v1/projects/{project_id}/graph/proposals": {"get": {"summary": "List graph proposals"}, "post": {"summary": "Create a provenance-backed graph proposal"}},
         "/v1/projects/{project_id}/graph/proposals/{proposal_id}/review": {"post": {"summary": "Review a graph proposal"}},
@@ -1469,6 +1470,27 @@ async def project_github_export(request: Request) -> Response:
     return Response(content, media_type="application/zip", headers={"Content-Disposition": f'attachment; filename="{project_id}-research-bundle.zip"'})
 
 
+async def project_notes_export(request: Request) -> Response:
+    project_id = request.path_params["project_id"]
+    owner_id = auth.bind_agent_id("anonymous", request)
+    report = workspace.get_project_report(request.app.state.conn, project_id, owner_id)
+    if report is None:
+        return JSONResponse({"error": "project not found"}, status_code=404)
+    target = request.query_params.get("target", "obsidian")
+    query_history = workspace.list_query_history(request.app.state.conn, project_id, owner_id)
+    notes = workspace.list_project_notes(request.app.state.conn, project_id, owner_id)
+    valid, broken_id = audit.verify_project(request.app.state.conn, project_id)
+    audit_status = {"valid": valid, "event_count": len(audit.list_events(request.app.state.conn, project_id)), "first_broken_event_id": broken_id}
+    try:
+        content = exports.cited_notes_markdown(report, notes, query_history, audit_status, target)
+    except ValueError as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    exports.record_export(request.app.state.conn, project_id, f"{target}-notes", content, auth.bind_agent_id("api:notes-export", request))
+    audit.record(request.app.state.conn, project_id, "cited_notes_exported", "project", project_id, owner_id, {"target": target, "format": "markdown", "size_bytes": len(content)})
+    request.app.state.conn.commit()
+    return Response(content, media_type="text/markdown", headers={"Content-Disposition": f'attachment; filename="{project_id}-{target}-notes.md"'})
+
+
 async def save_reviewed_project_evidence(request: Request) -> JSONResponse:
     try:
         payload = await request.json()
@@ -1783,6 +1805,7 @@ def api_routes() -> list[Route]:
         Route("/v1/projects/{project_id}/notebook", project_notebook),
         Route("/v1/projects/{project_id}/imports/zotero", project_zotero_import, methods=["POST"]),
         Route("/v1/projects/{project_id}/github-export", project_github_export),
+        Route("/v1/projects/{project_id}/notes-export", project_notes_export),
         Route("/v1/projects/{project_id}/audit", project_audit),
         Route("/v1/projects/{project_id}/audit/export", project_audit_export, methods=["POST"]),
         Route("/v1/projects/{project_id}/graph/proposals", project_graph_proposals, methods=["GET", "POST"]),

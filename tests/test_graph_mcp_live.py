@@ -116,6 +116,9 @@ async def test_mcp_graph_propose_review_and_trace(tmp_path):
         bundle_payload = json.loads(bundle.content[0].text)
         with zipfile.ZipFile(io.BytesIO(base64.b64decode(bundle_payload["content_base64"]))) as archive:
             assert "MANIFEST.json" in archive.namelist()
+        cited_notes = await session.call_tool("export_project_cited_notes", {"project_id": project_id, "target": "obsidian"})
+        assert cited_notes.isError is False, cited_notes.content
+        assert "export_target: \"obsidian\"" in json.loads(cited_notes.content[0].text)["content_utf8"]
 
     with sqlite3.connect(db_path) as conn:
         assert conn.execute("SELECT status FROM graph_proposals").fetchone()[0] == "pending"

@@ -746,6 +746,24 @@ def export_project_github_bundle(project_id: str, ctx: Context) -> dict:
 
 
 @mcp.tool(annotations=WRITE_ANNOTATIONS)
+def export_project_cited_notes(project_id: str, ctx: Context, target: str = "obsidian") -> dict:
+    """Export cited Markdown notes for Obsidian or Notion import."""
+    owner = _bound("mcp:user", ctx)
+    report = workspace.get_project_report(_conn, project_id, owner)
+    if report is None:
+        raise ValueError("project not found")
+    query_history = workspace.list_query_history(_conn, project_id, owner)
+    notes = workspace.list_project_notes(_conn, project_id, owner)
+    valid, broken_id = audit.verify_project(_conn, project_id)
+    audit_status = {"valid": valid, "event_count": len(audit.list_events(_conn, project_id)), "first_broken_event_id": broken_id}
+    content = exports.cited_notes_markdown(report, notes, query_history, audit_status, target)
+    record = exports.record_export(_conn, project_id, f"{target}-notes", content, owner)
+    audit.record(_conn, project_id, "cited_notes_exported", "project", project_id, owner, {"target": target, "format": "markdown", "size_bytes": len(content), "actor": "mcp"})
+    _conn.commit()
+    return {"format": f"{target}-notes", "filename": f"{project_id}-{target}-notes.md", "media_type": "text/markdown", "content_utf8": content.decode("utf-8"), "export": record}
+
+
+@mcp.tool(annotations=WRITE_ANNOTATIONS)
 def save_reviewed_evidence(
     project_id: str, ranking_run_id: str, candidate_ids: list[str], ctx: Context, override_note: str = ""
 ) -> dict:
