@@ -69,6 +69,9 @@ python -m biolab.server
 
 The MCP endpoint is <http://127.0.0.1:8000/mcp>.
 
+For ChatGPT, Claude, and other research-client connection instructions, see
+[External AI integrations](docs/EXTERNAL_AI_INTEGRATIONS.md).
+
 ## Basic workflow
 
 Search for papers:
