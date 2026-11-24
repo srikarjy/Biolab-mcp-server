@@ -1,6 +1,8 @@
 """Offline acceptance tests for the local dashboard and REST API."""
 
 import base64
+import io
+import zipfile
 
 from biolab import auth, evidence, rag, retrieval_log
 from biolab.web import create_app
@@ -105,6 +107,19 @@ def test_zotero_metadata_import_is_preserved_and_deduplicated(tmp_path):
     assert second.json()["duplicate_count"] == 1
     assert len(papers.json()["retrievals"]) == 1
     assert papers.json()["retrievals"][0]["source"] == "zotero"
+
+
+def test_github_export_contains_reproducible_research_artifacts(tmp_path):
+    with TestClient(create_app(tmp_path / "github-export.db", require_auth=False)) as client:
+        project = client.post("/v1/projects", json={"name": "Bundle review"}).json()
+        bundle = client.get(f"/v1/projects/{project['project_id']}/github-export")
+
+    assert bundle.status_code == 200
+    assert bundle.headers["content-type"].startswith("application/zip")
+    with zipfile.ZipFile(io.BytesIO(bundle.content)) as archive:
+        names = set(archive.namelist())
+        assert {"README.md", "biolab-project.json", "project-notebook.ipynb", "audit.json", "MANIFEST.json"} <= names
+        assert archive.read("MANIFEST.json")
 
 
 def test_selected_mcp_paper_flows_into_project_parser_and_notes(monkeypatch, tmp_path):
