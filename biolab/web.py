@@ -32,6 +32,7 @@ from biolab import (
     jobs,
     rag,
     ranking,
+    rate_limit,
     retrieval_log,
     workspace,
     zotero,
@@ -1695,6 +1696,7 @@ class RestApiKeyAuthMiddleware:
     def __init__(self, app, require_auth: bool = False):
         self.app = app
         self.require_auth = require_auth
+        self.limiter = rate_limit.SlidingWindowRateLimiter.from_env()
 
     async def __call__(self, scope, receive, send):  # noqa: PLR0911, PLR0915 - auth and idempotency are one ASGI boundary
         if scope["type"] != "http":
@@ -1708,6 +1710,12 @@ class RestApiKeyAuthMiddleware:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(raw=message.setdefault("headers", []))
                 headers.append("x-request-id", request_id)
+                decision = scope.get("biolab_rate_limit")
+                if decision is not None and decision.limit:
+                    headers.append("x-ratelimit-limit", str(decision.limit))
+                    headers.append("x-ratelimit-remaining", str(decision.remaining))
+                    if not decision.allowed:
+                        headers.append("retry-after", str(decision.retry_after))
             await send(message)
 
         if path in {"/", "/health", "/openapi.json", "/.well-known/agent-card.json"}:
@@ -1736,6 +1744,15 @@ class RestApiKeyAuthMiddleware:
             return
 
         scope["biolab_identity"] = identity
+        decision = self.limiter.check(identity)
+        scope["biolab_rate_limit"] = decision
+        if not decision.allowed:
+            response = JSONResponse(
+                {"error": {"code": "rate_limit_exceeded", "message": "request quota exceeded", "retry_after_seconds": decision.retry_after}, "request_id": request_id},
+                status_code=429,
+            )
+            await response(scope, receive, send_with_request_id)
+            return
         idempotency_key = headers.get(b"idempotency-key", b"").decode("latin-1").strip()
         replay_receive = receive
         request_body = b""
