@@ -29,6 +29,7 @@ from biolab import (
     graph,
     hf_parser,
     inference,
+    jobs,
     rag,
     ranking,
     retrieval_log,
@@ -102,6 +103,9 @@ OPENAPI_SCHEMA = {
         "/v1/projects/{project_id}/query-history": {"get": {"summary": "List project-scoped RAG query history"}},
         "/v1/parser/runs/{parser_run_id}": {"get": {"summary": "Inspect parsed document blocks"}},
         "/v1/parser/runs/{parser_run_id}/rebuild-index": {"post": {"summary": "Rebuild project RAG vectors from accepted blocks"}},
+        "/v1/parser/runs/{parser_run_id}/rebuild-index-job": {"post": {"summary": "Queue a bounded RAG index rebuild job"}},
+        "/v1/jobs/{job_id}": {"get": {"summary": "Get a background job"}},
+        "/v1/jobs/{job_id}/run": {"post": {"summary": "Run one queued background job attempt"}},
         "/v1/parser/runs/{parser_run_id}/blocks/{block_id}/review": {"post": {"summary": "Accept or exclude a parsed block for RAG"}},
         "/v1/parser/runs/{parser_run_id}/flush": {"post": {"summary": "Flush parsed document blocks"}},
         "/v1/parser/runs/{parser_run_id}/download": {"get": {"summary": "Download parsed document JSON"}},
@@ -1202,6 +1206,42 @@ async def parser_rebuild_index(request: Request) -> JSONResponse:
     return JSONResponse(result)
 
 
+async def parser_rebuild_index_job(request: Request) -> JSONResponse:
+    owner_id = auth.request_identity(request)
+    try:
+        run = document_parser.assert_run_access(request.app.state.conn, request.path_params["parser_run_id"], owner_id)
+        if not run.get("project_id"):
+            return JSONResponse({"error": "project required for project-scoped RAG"}, status_code=422)
+        payload = await request.json() if request.method == "POST" else {}
+        job = jobs.enqueue(
+            request.app.state.conn, project_id=run["project_id"], kind="parser_index_rebuild",
+            payload={"parser_run_id": request.path_params["parser_run_id"]}, created_by=owner_id,
+            idempotency_key=str(payload.get("idempotency_key")) if payload.get("idempotency_key") else None,
+        )
+    except ValueError:
+        return JSONResponse({"error": "parser run not found"}, status_code=404)
+    except (TypeError, json.JSONDecodeError) as exc:
+        return JSONResponse({"error": str(exc)}, status_code=400)
+    return JSONResponse(job, status_code=202)
+
+
+async def job_detail(request: Request) -> JSONResponse:
+    try:
+        result = jobs.get(request.app.state.conn, request.path_params["job_id"], auth.request_identity(request))
+    except ValueError:
+        result = None
+    return JSONResponse(result or {"error": "job not found"}, status_code=200 if result else 404)
+
+
+async def job_run(request: Request) -> JSONResponse:
+    try:
+        result = jobs.run_once(request.app.state.conn, request.path_params["job_id"], auth.request_identity(request))
+    except ValueError as exc:
+        message = str(exc)
+        return JSONResponse({"error": message}, status_code=409 if "already" in message else 404)
+    return JSONResponse(result)
+
+
 async def verify(request: Request) -> JSONResponse:
     valid, broken_id = retrieval_log.verify_chain(request.app.state.conn)
     count = request.app.state.conn.execute("SELECT count(*) FROM retrievals").fetchone()[0]
@@ -1797,6 +1837,9 @@ def api_routes() -> list[Route]:
         Route("/v1/parser/runs/{parser_run_id}/blocks/{block_id}/review", parser_block_review, methods=["POST"]),
         Route("/v1/parser/runs/{parser_run_id}/flush", parser_flush, methods=["POST"]),
         Route("/v1/parser/runs/{parser_run_id}/rebuild-index", parser_rebuild_index, methods=["POST"]),
+        Route("/v1/parser/runs/{parser_run_id}/rebuild-index-job", parser_rebuild_index_job, methods=["POST"]),
+        Route("/v1/jobs/{job_id}", job_detail),
+        Route("/v1/jobs/{job_id}/run", job_run, methods=["POST"]),
         Route("/v1/parser/runs/{parser_run_id}/download", parser_download),
         Route("/v1/retrievals/{retrieval_id}", get_retrieval),
         Route("/v1/verify", verify),

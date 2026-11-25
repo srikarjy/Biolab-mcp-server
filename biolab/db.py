@@ -71,6 +71,28 @@ CREATE TABLE IF NOT EXISTS idempotency_keys (
     PRIMARY KEY (actor_id, idempotency_key)
 );
 
+CREATE TABLE IF NOT EXISTS background_jobs (
+    job_id          TEXT PRIMARY KEY,
+    project_id      TEXT NOT NULL,
+    kind            TEXT NOT NULL,
+    status          TEXT NOT NULL CHECK (status IN ('queued', 'running', 'succeeded', 'failed')),
+    payload         TEXT NOT NULL DEFAULT '{}',
+    result          TEXT NOT NULL DEFAULT '{}',
+    error           TEXT NOT NULL DEFAULT '',
+    created_by      TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    started_at      TEXT,
+    finished_at     TEXT,
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    max_attempts    INTEGER NOT NULL DEFAULT 3,
+    idempotency_key TEXT,
+    FOREIGN KEY (project_id) REFERENCES projects(project_id)
+);
+CREATE INDEX IF NOT EXISTS idx_background_jobs_project ON background_jobs(project_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_background_jobs_status ON background_jobs(status, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_background_jobs_idempotency
+    ON background_jobs(created_by, idempotency_key) WHERE idempotency_key IS NOT NULL;
+
 CREATE TABLE IF NOT EXISTS projects (
     project_id   TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
