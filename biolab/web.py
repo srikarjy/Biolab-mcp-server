@@ -851,12 +851,14 @@ async def openapi(_request: Request) -> JSONResponse:
 async def metrics(request: Request) -> JSONResponse:
     conn = request.app.state.conn
     valid, broken_id = retrieval_log.verify_chain(conn)
-    tables = ("retrievals", "projects", "evidence_watches", "evidence_events", "claims")
+    tables = ("retrievals", "projects", "evidence_watches", "evidence_events", "claims", "parser_runs", "background_jobs", "audit_events")
     counts = {table: conn.execute(f"SELECT count(*) FROM {table}").fetchone()[0] for table in tables}
+    runtime = getattr(request.app.state, "runtime_metrics", {})
     return JSONResponse({
         "counts": counts,
         "audit_chain_valid": valid,
         "first_broken_retrieval_id": broken_id,
+        "runtime": dict(runtime),
     })
 
 
@@ -1698,6 +1700,18 @@ class RestApiKeyAuthMiddleware:
         self.require_auth = require_auth
         self.limiter = rate_limit.SlidingWindowRateLimiter.from_env()
 
+    @staticmethod
+    def _record_runtime(scope, status: int) -> None:
+        metrics = getattr(scope["app"].state, "runtime_metrics", None)
+        if metrics is None:
+            metrics = {"requests_total": 0, "responses_2xx": 0, "responses_4xx": 0, "responses_5xx": 0, "rate_limit_rejections": 0}
+            scope["app"].state.runtime_metrics = metrics
+        metrics["requests_total"] += 1
+        bucket = "responses_2xx" if status < 300 else "responses_4xx" if status < 500 else "responses_5xx"
+        metrics[bucket] += 1
+        if status == 429:
+            metrics["rate_limit_rejections"] += 1
+
     async def __call__(self, scope, receive, send):  # noqa: PLR0911, PLR0915 - auth and idempotency are one ASGI boundary
         if scope["type"] != "http":
             await self.app(scope, receive, send)
@@ -1710,6 +1724,7 @@ class RestApiKeyAuthMiddleware:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(raw=message.setdefault("headers", []))
                 headers.append("x-request-id", request_id)
+                RestApiKeyAuthMiddleware._record_runtime(scope, message["status"])
                 decision = scope.get("biolab_rate_limit")
                 if decision is not None and decision.limit:
                     headers.append("x-ratelimit-limit", str(decision.limit))
